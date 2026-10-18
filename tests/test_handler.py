@@ -1,7 +1,9 @@
+import asyncio
 import logging
 
 import pytest
 
+from imessage_agent.handler import Agent, SenderResolver
 from imessage_agent.logsafe import LOGGER_NAME, log_event
 from tests.conftest import ALLOWED, OTHER, message
 
@@ -101,3 +103,119 @@ def test_log_event_rejects_unknown_fields():
         log_event("x", text="hello")
     with pytest.raises(ValueError):
         log_event("x", prompt="hello")
+
+
+async def test_quiet_question_answered_when_nobody_replies(clock):
+    from imessage_agent.context import ContextStore
+    from tests.conftest import FakeBB, FakeLLM, make_settings
+
+    s = make_settings(quiet_question_seconds=0.05)
+    bb, llm = FakeBB(), FakeLLM("sure")
+    ctx = ContextStore(5, 3600, clock=clock)
+    agent = Agent(s, bb, llm, ctx, images=None, resolver=SenderResolver(None, {}, use_contacts=False))  # type: ignore[arg-type]
+    assert await agent.process(message("anyone know when the game starts?", guid="q1")) == "stored"
+    assert llm.calls == [] and bb.texts == []
+    await asyncio.sleep(0.12)
+    await agent.drain()
+    assert len(llm.calls) == 1
+    assert bb.texts == [(ALLOWED, "sure")]
+
+
+async def test_quiet_question_dropped_when_someone_answers(clock):
+    from imessage_agent.context import ContextStore
+    from tests.conftest import FakeBB, FakeLLM, make_settings
+
+    s = make_settings(quiet_question_seconds=0.05)
+    bb, llm = FakeBB(), FakeLLM("sure")
+    ctx = ContextStore(5, 3600, clock=clock)
+    agent = Agent(s, bb, llm, ctx, images=None, resolver=SenderResolver(None, {}, use_contacts=False))  # type: ignore[arg-type]
+    await agent.process(message("anyone know when the game starts?", guid="q2"))
+    await agent.process(message("8pm", sender="+15550002222", guid="a2"))
+    await asyncio.sleep(0.12)
+    await agent.drain()
+    assert llm.calls == [] and bb.texts == []
+
+
+async def test_quiet_question_off_by_default(agent_parts):
+    s, bb, llm, ctx, agent = agent_parts
+    assert s.quiet_question_seconds == 0
+    await agent.process(message("is anyone around?", guid="q3"))
+    await asyncio.sleep(0.05)
+    await agent.drain()
+    assert llm.calls == [] and bb.texts == []
+
+
+def _cloud_agent(local_reply, clock):
+    from imessage_agent.context import ContextStore
+    from tests.conftest import FakeBB, FakeLLM, make_settings
+
+    s = make_settings()
+    bb, local, cloud = FakeBB(), FakeLLM(local_reply), FakeLLM("from the cloud")
+    cloud.name = "anthropic"
+    ctx = ContextStore(5, 3600, clock=clock)
+    agent = Agent(
+        s, bb, local, ctx, images=None,
+        resolver=SenderResolver(None, {}, use_contacts=False),  # type: ignore[arg-type]
+        cloud=cloud,
+    )
+    return agent, bb, local, cloud
+
+
+async def test_mention_routed_to_cloud_when_router_says_yes(clock):
+    agent, bb, local, cloud = _cloud_agent("yes", clock)
+    assert await agent.process(message("coco who won last night?", guid="c1")) == "handled:mention"
+    assert len(local.calls) == 1, "local model is asked only the yes/no question"
+    assert local.calls[0][0]["content"].endswith("yes or no.")
+    assert len(cloud.calls) == 1
+    assert bb.texts == [(ALLOWED, "from the cloud")]
+
+
+async def test_mention_stays_local_when_router_says_no(clock):
+    agent, bb, local, cloud = _cloud_agent("no", clock)
+    await agent.process(message("coco roast me", guid="c2"))
+    assert len(local.calls) == 2, "router call + the actual reply"
+    assert cloud.calls == []
+    assert bb.texts == [(ALLOWED, "no")]
+
+
+async def test_ask_command_always_goes_to_cloud(clock):
+    agent, bb, local, cloud = _cloud_agent("no", clock)
+    assert await agent.process(message("/ask what time is kickoff", guid="c3")) == "handled:ask"
+    assert local.calls == []
+    assert len(cloud.calls) == 1
+    # the question itself (without the slash command) is what the cloud model sees
+    assert cloud.calls[0][-1]["content"].endswith("what time is kickoff")
+    assert bb.texts == [(ALLOWED, "from the cloud")]
+
+
+async def test_ask_without_cloud_falls_back_to_local(agent_parts):
+    s, bb, llm, ctx, agent = agent_parts
+    assert agent.cloud is None
+    assert await agent.process(message("/ask something", guid="c4")) == "handled:ask"
+    assert len(llm.calls) == 1 and bb.texts == [(ALLOWED, "yo")]
+
+
+async def test_help_mentions_ask_only_with_cloud(clock, agent_parts):
+    s, bb, llm, ctx, agent = agent_parts
+    await agent.process(message("/help", guid="h1"))
+    assert "/ask" not in bb.texts[-1][1] and "nothing leaves it" in bb.texts[-1][1]
+    agent2, bb2, _, _ = _cloud_agent("no", clock)
+    await agent2.process(message("/help", guid="h2"))
+    assert "/ask" in bb2.texts[-1][1] and "leaves the mac" in bb2.texts[-1][1]
+
+
+async def test_cloud_failure_falls_back_to_local(clock, caplog):
+    agent, bb, local, cloud = _cloud_agent("yes", clock)
+
+    async def boom(system, messages):
+        cloud.calls.append(messages)
+        raise RuntimeError("no credits")
+
+    cloud.reply = boom
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        assert await agent.process(message("coco who won last night?", guid="f1")) == "handled:mention"
+    assert len(cloud.calls) == 1
+    assert len(local.calls) == 2, "router call, then the local reply after the cloud failed"
+    assert bb.texts == [(ALLOWED, "yes")]
+    assert any("event=llm.cloud_failed" in r.getMessage() and "error=RuntimeError" in r.getMessage() for r in caplog.records)
+

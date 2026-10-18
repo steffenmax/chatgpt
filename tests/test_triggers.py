@@ -45,3 +45,13 @@ def test_detect_prefers_command_over_mention():
 
 def test_plain_message_is_none():
     assert detect("hello everyone", "Coco").kind == "none"
+
+
+def test_ask_command_and_yes_no_parsing():
+    from imessage_agent.llm import parse_yes_no
+    from imessage_agent.triggers import parse_command
+
+    assert parse_command("/ask who won the game") == ("ask", "who won the game")
+    assert parse_command("/ASK  spaced") == ("ask", "spaced")
+    assert parse_yes_no("Yes") and parse_yes_no("yes.") and parse_yes_no("<think>hm</think> yes")
+    assert not parse_yes_no("no") and not parse_yes_no("yo") and not parse_yes_no("") and not parse_yes_no("yesterday")

@@ -38,6 +38,21 @@ def build_llm(settings: Settings) -> TextBackend:
         max_tokens=settings.ollama_max_tokens,
         timeout=settings.ollama_timeout_seconds,
         keep_alive=settings.ollama_keep_alive,
+        num_ctx=settings.ollama_num_ctx,
+    )
+
+
+def build_cloud(settings: Settings) -> TextBackend | None:
+    """Second backend for fact lookups. None unless CLOUD_FACTS_ENABLED (and not full cloud mode)."""
+    if settings.cloud_llm_enabled or not settings.cloud_facts_enabled:
+        return None
+    return AnthropicBackend(
+        api_key=settings.anthropic_api_key,
+        model=settings.anthropic_model,
+        max_tokens=settings.anthropic_max_tokens,
+        timeout=settings.anthropic_timeout_seconds,
+        web_search=True,
+        max_searches=settings.cloud_facts_max_searches,
     )
 
 
@@ -138,6 +153,7 @@ def create_app(settings: Settings | None = None, agent: Agent | None = None) -> 
             "ollama": ollama_ok,
             "llm_backend": ag.llm.name,
             "cloud_llm_enabled": settings.cloud_llm_enabled,
+            "cloud_facts_enabled": ag.cloud is not None,
             "image_queue": ag.images.qsize() if ag.images else None,
             "chats_with_context": ag.context.chat_count(),
             "allowlisted_chats": len(settings.allowed_chat_guids),
@@ -199,6 +215,7 @@ def _build_agent(settings: Settings) -> Agent:
         settings, bb, llm, context, images,
         resolver=SenderResolver(bb, settings.sender_names),
         llm_gate=llm_gate,
+        cloud=build_cloud(settings),
     )
     agent_holder["a"] = agent
     return agent

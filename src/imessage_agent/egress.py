@@ -26,6 +26,17 @@ def egress_report(settings: Settings) -> list[str]:
             "  Set CLOUD_LLM_ENABLED=false to keep everything on this Mac.",
             "=" * 72,
         ]
+    elif settings.cloud_facts_enabled:
+        lines += [
+            "",
+            "=" * 72,
+            "  WARNING: CLOUD_FACTS_ENABLED=true",
+            "  When a mention needs outside/current facts (or someone uses /ask), the",
+            "  triggering message AND the rolling chat context are sent to api.anthropic.com",
+            f"  (model {settings.anthropic_model}, web search on). Other replies stay local.",
+            "  Set CLOUD_FACTS_ENABLED=false to keep everything on this Mac.",
+            "=" * 72,
+        ]
     else:
         lines.append("  Cloud text mode is OFF. No message content leaves this machine.")
     return lines

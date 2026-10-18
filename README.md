@@ -29,6 +29,8 @@ By default **no message content leaves the machine**. See [Privacy model](#priva
 |---|---|
 | Message contains the bot's name (`BOT_NAME`, whole word, `@` optional) | Replies, short and casual, using the last N messages of that chat as context (with sender names) |
 | `/image <prompt>` | Replies "on it", queues a local FLUX job (one at a time), sends the PNG back, deletes the file |
+| `/ask <question>` | Only with `CLOUD_FACTS_ENABLED=true`: answers via the Anthropic API with web search |
+| A question (`...?`) nobody answers for `QUIET_QUESTION_SECONDS` | Treated as addressed to the bot (off by default) |
 | `/forget` | Wipes that chat's context immediately |
 | `/help` | Lists commands |
 | Anything else | Ignored (but remembered in the rolling context so replies make sense) |
@@ -205,6 +207,8 @@ The LaunchAgent starts at login, restarts on crash (`KeepAlive`), and logs to `~
 **What is logged:** event type, chat GUID, message GUID, command kind, durations, queue length, HTTP status, exception class names, timestamps. The logging helper only accepts an allow-list of field names and raises if code tries to log anything else; a filter additionally scrubs all three secrets from every record (including URLs inside HTTP exceptions). uvicorn's access log is disabled because it would print the webhook query string. Tests assert that message text, prompts, bot replies and secrets never appear in captured logs.
 
 **Network:** the process opens connections only to the hosts printed at startup: BlueBubbles (`127.0.0.1:1234`), Ollama (`127.0.0.1:11434`) and, only if `CLOUD_LLM_ENABLED=true`, `api.anthropic.com:443`. The server refuses to bind to anything but loopback. There is no telemetry, update check, crash reporter or analytics. Model downloads (`ollama pull`, mflux's first run) are separate one-time downloads of public weights.
+
+**Cloud fact lookups (`CLOUD_FACTS_ENABLED=true`, default off):** a lighter middle ground. Replies stay local unless the local model judges that the last message needs outside or current information (scores, news, schedules, prices), or someone uses `/ask`. Only those mentions send the triggering message plus that chat's rolling context to the Anthropic API, which answers with web search (`CLOUD_FACTS_MAX_SEARCHES` per reply). The log records every escalation as `event=llm.escalate` with the reason (`router` or `command`). Needs `ANTHROPIC_API_KEY` and `uv sync --extra cloud`.
 
 **Cloud text mode (`CLOUD_LLM_ENABLED=true`, default off):** the triggering message plus that chat's rolling context (sender names and text) are sent to the Anthropic API to produce the text reply. Nothing else changes: images are always generated locally, the allowlist/TTL/logging rules still apply, and a boxed warning is printed at startup. Install the optional dependency with `uv sync --extra cloud`.
 

@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-Kind = Literal["mention", "image", "help", "forget", "none"]
+Kind = Literal["mention", "ask", "image", "help", "forget", "none"]
 
 
 @dataclass(frozen=True)
@@ -15,7 +15,7 @@ class Trigger:
     arg: str = ""  # image prompt, or the message with the mention left in for chat
 
 
-_COMMANDS = {"/image": "image", "/img": "image", "/help": "help", "/forget": "forget"}
+_COMMANDS = {"/image": "image", "/img": "image", "/ask": "ask", "/help": "help", "/forget": "forget"}
 
 
 def mention_pattern(bot_name: str) -> re.Pattern[str]:
@@ -56,11 +56,14 @@ def detect(text: str | None, bot_name: str) -> Trigger:
     return Trigger("none")
 
 
-def help_text(bot_name: str, image_enabled: bool) -> str:
+def help_text(bot_name: str, image_enabled: bool, cloud_facts: bool = False) -> str:
+    where = "most of it runs on one mac" if cloud_facts else "everything i do runs on one mac, nothing leaves it"
     lines = [
-        f"hey, i'm {bot_name}. everything i do runs on one mac, nothing leaves it.",
+        f"hey, i'm {bot_name}. {where}.",
         f"- say \"{bot_name}\" in a message and i'll reply",
     ]
+    if cloud_facts:
+        lines.append("- /ask <question> - i'll look it up online (that one leaves the mac)")
     if image_enabled:
         lines.append("- /image <prompt> - i'll make a picture (takes a bit)")
     lines += [

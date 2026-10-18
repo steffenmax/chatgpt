@@ -95,3 +95,18 @@ def test_server_refuses_non_loopback_bind():
     with pytest.raises(Exception, match="fatal configuration"):
         with TestClient(app):
             pass
+
+
+def test_redactor_keeps_non_string_args_but_scrubs_secret_objects(caplog):
+    """Third-party loggers pass ints (%d) and URL-like objects; both must survive the filter."""
+    from imessage_agent.logsafe import SecretRedactingFilter
+
+    class Url:
+        def __str__(self):
+            return f"http://127.0.0.1/webhook?secret={SECRET}"
+
+    f = SecretRedactingFilter([SECRET])
+    rec = logging.LogRecord("httpx2", logging.INFO, __file__, 1, 'HTTP Request: %s %s "%s %d"', ("POST", Url(), "HTTP/1.1", 200), None)
+    assert f.filter(rec)
+    text = rec.getMessage()
+    assert SECRET not in text and "***" in text and "200" in text

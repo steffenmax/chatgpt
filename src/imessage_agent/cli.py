@@ -77,7 +77,7 @@ async def cmd_check(s: Settings, args) -> int:
     for line in egress_report(s):
         print(line)
     for purpose, host in s.outbound_hosts():
-        if not is_loopback_host(host) and purpose != "Anthropic API (cloud text mode)":
+        if not is_loopback_host(host) and not purpose.startswith("Anthropic API"):
             print(f"!! {purpose} is not on loopback ({host}); message content would leave this Mac.")
             ok = False
     print()

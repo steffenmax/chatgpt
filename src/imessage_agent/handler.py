@@ -13,7 +13,15 @@ from .bluebubbles import BlueBubblesClient
 from .config import Settings
 from .context import ContextStore
 from .imagegen import ImageJob, ImageQueue
-from .llm import TextBackend, build_messages, clean_reply
+from .llm import (
+    CLOUD_FACTS_ADDENDUM,
+    NEEDS_FACTS_SYSTEM,
+    TextBackend,
+    build_messages,
+    clean_reply,
+    facts_router_messages,
+    parse_yes_no,
+)
 from .logsafe import exc_name, log_event
 from .triggers import detect, help_text
 
@@ -74,10 +82,13 @@ class Agent:
         images: ImageQueue | None,
         resolver: SenderResolver | None = None,
         llm_gate: asyncio.Semaphore | None = None,
+        cloud: TextBackend | None = None,
     ):
         self.s = settings
         self.bb = bb
         self.llm = llm
+        # Optional second backend for questions that need outside information.
+        self.cloud = cloud
         self.context = context
         self.images = images
         self.resolver = resolver or SenderResolver(bb, settings.sender_names)
@@ -136,13 +147,23 @@ class Agent:
 
         if trigger.kind in ("none", "mention"):
             self.context.add(chat_guid, sender, text)
+        elif trigger.kind == "ask":
+            self.context.add(chat_guid, sender, trigger.arg or text)
         if trigger.kind == "none":
+            self._maybe_quiet_question(chat_guid, text)
             return "stored"
 
         log_event("trigger", chat_guid=chat_guid, kind=trigger.kind)
         try:
             if trigger.kind == "help":
-                await self._say(chat_guid, help_text(self.s.bot_name, self.s.image_enabled and self.images is not None))
+                await self._say(
+                    chat_guid,
+                    help_text(
+                        self.s.bot_name,
+                        self.s.image_enabled and self.images is not None,
+                        cloud_facts=self.cloud is not None,
+                    ),
+                )
             elif trigger.kind == "forget":
                 self.context.forget(chat_guid)
                 log_event("context.forgot", chat_guid=chat_guid)
@@ -151,29 +172,80 @@ class Agent:
                 await self._handle_image(chat_guid, trigger.arg)
             elif trigger.kind == "mention":
                 await self._handle_mention(chat_guid)
+            elif trigger.kind == "ask":
+                await self._handle_mention(chat_guid, force_cloud=True)
         except Exception as exc:  # noqa: BLE001
             log_event("handler.error", chat_guid=chat_guid, kind=trigger.kind, error=exc_name(exc))
             return f"error:{exc_name(exc)}"
         return f"handled:{trigger.kind}"
 
     # ---------------------------------------------------------------- handlers
-    async def _handle_mention(self, chat_guid: str) -> None:
+    async def _handle_mention(self, chat_guid: str, force_cloud: bool = False) -> None:
         history = self.context.get(chat_guid)
         messages = build_messages(self.s.persona, self.s.bot_name, history)
+        backend = self.llm
+        system = self.s.persona
+        if self.cloud is not None:
+            reason = "command" if force_cloud else "router"
+            if force_cloud or await self._needs_facts(history):
+                backend = self.cloud
+                system = self.s.persona + CLOUD_FACTS_ADDENDUM
+                log_event("llm.escalate", chat_guid=chat_guid, reason=reason, backend=backend.name)
         started = time.monotonic()
         async with self._llm_gate:
-            raw = await self.llm.reply(self.s.persona, messages)
+            try:
+                raw = await backend.reply(system, messages)
+            except Exception as exc:  # noqa: BLE001
+                if backend is self.llm:
+                    raise
+                # Cloud unavailable (no credits, network, rate limit): answer locally instead.
+                log_event("llm.cloud_failed", chat_guid=chat_guid, backend=backend.name, error=exc_name(exc))
+                backend, system = self.llm, self.s.persona
+                raw = await backend.reply(system, messages)
         reply = clean_reply(raw, self.s.bot_name)
         log_event(
             "llm.reply",
             chat_guid=chat_guid,
-            backend=self.llm.name,
+            backend=backend.name,
             duration_ms=int((time.monotonic() - started) * 1000),
             chars=len(reply),
         )
         if not reply:
             reply = "hm, blanked. say that again?"
         await self._say(chat_guid, reply)
+
+    async def _needs_facts(self, history) -> bool:
+        """Ask the local model whether the last message needs outside information."""
+        try:
+            async with self._llm_gate:
+                raw = await self.llm.reply(NEEDS_FACTS_SYSTEM, facts_router_messages(history))
+        except Exception as exc:  # noqa: BLE001
+            log_event("router.error", error=exc_name(exc))
+            return False
+        return parse_yes_no(raw)
+
+    def _maybe_quiet_question(self, chat_guid: str, text: str) -> None:
+        """A question nobody answers for a while is treated as addressed to the bot."""
+        if self.s.quiet_question_seconds <= 0 or not text.rstrip().endswith("?"):
+            return
+        history = self.context.get(chat_guid)
+        if not history:
+            return
+        marker = history[-1]  # the message object just stored
+        t = asyncio.create_task(self._quiet_question(chat_guid, marker))
+        self._tasks.add(t)
+        t.add_done_callback(self._tasks.discard)
+
+    async def _quiet_question(self, chat_guid: str, marker) -> None:
+        await asyncio.sleep(self.s.quiet_question_seconds)
+        history = self.context.get(chat_guid)
+        if not history or history[-1] is not marker:
+            return  # someone (or the bot) already replied, or the context was wiped
+        log_event("trigger", chat_guid=chat_guid, kind="quiet_question")
+        try:
+            await self._handle_mention(chat_guid)
+        except Exception as exc:  # noqa: BLE001
+            log_event("handler.error", chat_guid=chat_guid, kind="quiet_question", error=exc_name(exc))
 
     async def _handle_image(self, chat_guid: str, prompt: str) -> None:
         if not self.s.image_enabled or self.images is None:

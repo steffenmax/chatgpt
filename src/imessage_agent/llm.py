@@ -15,6 +15,35 @@ from .context import ContextMessage
 
 _THINK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
 
+# --- cloud fact lookups -------------------------------------------------------
+NEEDS_FACTS_SYSTEM = (
+    "You are a strict classifier for a group-chat bot. Decide whether answering the LAST "
+    "message requires information the bot cannot reliably know from memory: anything current "
+    "or time-sensitive (news, scores, schedules, prices, weather, hours, who won or what happened "
+    "recently) or a precise fact that should be looked up (stats, dates, numbers, specs, addresses). "
+    "Opinions, jokes, roasts, advice, chit-chat and general knowledge do NOT. "
+    "Answer with exactly one word: yes or no."
+)
+
+CLOUD_FACTS_ADDENDUM = (
+    "\n\nFor this reply you have a web search tool. Use it when the question needs current or "
+    "precise facts (scores, schedules, news, prices, weather, stats); one or two quick searches "
+    "are enough. Then answer in the same short texting style described above: facts first, no "
+    "markdown, no links unless someone asks for one, and name the source in a few words only if "
+    "it matters."
+)
+
+
+def facts_router_messages(history: list[ContextMessage]) -> list[dict[str, str]]:
+    """The recent chat as one user turn, for the yes/no router."""
+    lines = [f"{m.sender}: {m.text}" for m in history[-8:]]
+    return [{"role": "user", "content": "\n".join(lines) + "\n\nDoes the LAST message need outside information? yes or no."}]
+
+
+def parse_yes_no(text: str) -> bool:
+    words = _THINK_RE.sub("", text or "").strip().lower().split()
+    return bool(words) and words[0].strip(".,!") == "yes"
+
 
 def build_messages(persona: str, bot_name: str, history: list[ContextMessage]) -> list[dict[str, str]]:
     """Convert rolling context into chat messages.
@@ -70,12 +99,14 @@ class OllamaBackend:
         max_tokens: int = 300,
         timeout: float = 120.0,
         keep_alive: str = "30m",
+        num_ctx: int = 8192,
     ):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.keep_alive = keep_alive
+        self.num_ctx = num_ctx
         self._client = httpx.AsyncClient(base_url=self.base_url, timeout=timeout)
 
     async def reply(self, system: str, messages: list[dict[str, str]]) -> str:
@@ -84,7 +115,7 @@ class OllamaBackend:
             "messages": [{"role": "system", "content": system}, *messages],
             "stream": False,
             "keep_alive": self.keep_alive,
-            "options": {"temperature": self.temperature, "num_predict": self.max_tokens},
+            "options": {"temperature": self.temperature, "num_predict": self.max_tokens, "num_ctx": self.num_ctx},
         }
         r = await self._client.post("/api/chat", json=payload)
         r.raise_for_status()
@@ -124,20 +155,36 @@ class AnthropicBackend:
 
     name = "anthropic"
 
-    def __init__(self, api_key: str, model: str, max_tokens: int = 400, timeout: float = 60.0):
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        max_tokens: int = 400,
+        timeout: float = 60.0,
+        web_search: bool = False,
+        max_searches: int = 3,
+    ):
         import anthropic  # optional dependency: uv sync --extra cloud
 
         self.model = model
         self.max_tokens = max_tokens
+        self.web_search = web_search
+        self.max_searches = max_searches
         self._client = anthropic.AsyncAnthropic(api_key=api_key, timeout=timeout, max_retries=1)
 
     async def reply(self, system: str, messages: list[dict[str, str]]) -> str:
+        kwargs: dict = {}
+        if self.web_search and self.max_searches > 0:
+            # Server-side tool: the search runs on Anthropic's side, results come back in
+            # the same response. No extra round trips from this process.
+            kwargs["tools"] = [{"type": "web_search_20260209", "name": "web_search", "max_uses": self.max_searches}]
         resp = await self._client.messages.create(
             model=self.model,
             max_tokens=self.max_tokens,
             system=system,
             messages=messages,
             output_config={"effort": "low"},
+            **kwargs,
         )
         if resp.stop_reason == "refusal":
             return "can't help with that one"

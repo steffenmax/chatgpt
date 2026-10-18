@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     context_ttl_seconds: int = Field(default=6 * 60 * 60, ge=1)
     context_sweep_seconds: int = Field(default=60, ge=5)
     sender_names: Annotated[dict[str, str], NoDecode] = Field(default_factory=dict)
+    # A message ending in "?" that nobody answers within this many seconds is treated
+    # as addressed to the bot. 0 disables.
+    quiet_question_seconds: float = Field(default=0.0, ge=0.0)
 
     # --- webhook server (loopback only) ---
     host: str = "127.0.0.1"
@@ -55,6 +58,8 @@ class Settings(BaseSettings):
     ollama_max_tokens: int = Field(default=300, ge=1)
     ollama_timeout_seconds: float = Field(default=120.0, gt=0)
     ollama_keep_alive: str = "30m"
+    # Context window handed to Ollama (tokens). Must fit persona + CONTEXT_MAX_MESSAGES.
+    ollama_num_ctx: int = Field(default=8192, ge=512)
     unload_llm_before_image: bool = False
 
     # --- image generation (mflux, always local) ---
@@ -71,6 +76,11 @@ class Settings(BaseSettings):
 
     # --- optional cloud text mode (OFF by default) ---
     cloud_llm_enabled: bool = False
+    # Cloud fact lookups: ONLY mentions that need outside/current information (as judged
+    # by the local model, or explicit /ask) are answered by the Anthropic API with web
+    # search. Everything else stays local. Off by default.
+    cloud_facts_enabled: bool = False
+    cloud_facts_max_searches: int = Field(default=3, ge=0, le=10)
     anthropic_api_key: str = ""
     anthropic_model: str = "claude-opus-5-5"
     anthropic_max_tokens: int = Field(default=400, ge=1)
@@ -126,7 +136,13 @@ class Settings(BaseSettings):
         ]
         if self.cloud_llm_enabled:
             hosts.append(("Anthropic API (cloud text mode)", "api.anthropic.com:443"))
+        elif self.cloud_facts_enabled:
+            hosts.append(("Anthropic API (fact lookups)", "api.anthropic.com:443"))
         return hosts
+
+    @property
+    def any_cloud(self) -> bool:
+        return self.cloud_llm_enabled or self.cloud_facts_enabled
 
     def validate_runtime(self) -> list[str]:
         """Return a list of fatal configuration problems (empty = OK)."""
@@ -139,6 +155,8 @@ class Settings(BaseSettings):
             problems.append(f"HOST={self.host!r} is not loopback; refusing to start.")
         if self.cloud_llm_enabled and not self.anthropic_api_key:
             problems.append("CLOUD_LLM_ENABLED=true but ANTHROPIC_API_KEY is empty.")
+        if self.cloud_facts_enabled and not self.anthropic_api_key:
+            problems.append("CLOUD_FACTS_ENABLED=true but ANTHROPIC_API_KEY is empty.")
         if not self.allowed_chat_guids:
             problems.append(
                 "ALLOWED_CHAT_GUIDS is empty; the bot will answer nowhere. "

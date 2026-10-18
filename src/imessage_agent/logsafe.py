@@ -61,6 +61,13 @@ class SecretRedactingFilter(logging.Filter):
                 s = s.replace(sec, "***")
         return s
 
+    def _scrub_arg(self, a):
+        # Keep non-string args (ints for %d, objects for %r) unless their text form
+        # contains a secret, e.g. an httpx URL object carrying ?secret=...
+        text = a if isinstance(a, str) else str(a)
+        scrubbed = self._scrub(text)
+        return scrubbed if (isinstance(a, str) or scrubbed != text) else a
+
     def filter(self, record: logging.LogRecord) -> bool:
         if not self._secrets:
             return True
@@ -69,9 +76,9 @@ class SecretRedactingFilter(logging.Filter):
                 record.msg = self._scrub(record.msg)
             if record.args:
                 if isinstance(record.args, dict):
-                    record.args = {k: self._scrub(str(v)) for k, v in record.args.items()}
+                    record.args = {k: self._scrub_arg(v) for k, v in record.args.items()}
                 else:
-                    record.args = tuple(self._scrub(str(a)) for a in record.args)
+                    record.args = tuple(self._scrub_arg(a) for a in record.args)
             if record.exc_text:
                 record.exc_text = self._scrub(record.exc_text)
         except Exception:  # never let logging crash the app
@@ -92,13 +99,13 @@ def install_logging(level: str = "INFO", secrets: list[str] | None = None) -> No
     handler.addFilter(redactor)
     root.addHandler(handler)
     # Make sure third-party loggers (uvicorn, httpx) also go through redaction.
-    for name in ("uvicorn", "uvicorn.error", "uvicorn.access", "httpx", "httpcore"):
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access", "httpx", "httpcore", "httpx2", "httpcore2"):
         lg = logging.getLogger(name)
         lg.handlers = []
         lg.propagate = True
     logging.getLogger("uvicorn.access").disabled = True
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    for name in ("httpx", "httpcore", "httpx2", "httpcore2"):
+        logging.getLogger(name).setLevel(logging.WARNING)
 
 
 def log_event(event: str, level: int = logging.INFO, **fields) -> None:
