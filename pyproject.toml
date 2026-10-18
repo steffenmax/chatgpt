@@ -1,0 +1,38 @@
+[project]
+name = "imessage-agent"
+version = "0.1.0"
+description = "Private, self-hosted AI agent for iMessage group chats (BlueBubbles + Ollama + mflux). Runs entirely on one Mac."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "httpx>=0.27",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+]
+
+[project.optional-dependencies]
+# Only needed if CLOUD_LLM_ENABLED=true. Not installed by default.
+cloud = ["anthropic>=0.40"]
+
+[project.scripts]
+imessage-agent = "imessage_agent.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/imessage_agent"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

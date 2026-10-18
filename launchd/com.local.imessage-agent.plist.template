@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.local.imessage-agent</string>
+
+    <!-- Runs the server through uv so the project's own venv is used. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>__UV__</string>
+        <string>run</string>
+        <string>--directory</string>
+        <string>__PROJECT_DIR__</string>
+        <string>imessage-agent</string>
+        <string>serve</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__PROJECT_DIR__</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- mflux-generate and ollama live in these dirs; launchd has a minimal PATH. -->
+        <key>PATH</key>
+        <string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>HOME</key>
+        <string>__HOME__</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <!-- Restart on crash or non-zero exit; launchd waits ThrottleInterval between restarts. -->
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+
+    <!-- Logs: metadata only, never message content. -->
+    <key>StandardOutPath</key>
+    <string>__HOME__/Library/Logs/imessage-agent/agent.log</string>
+    <key>StandardErrorPath</key>
+    <string>__HOME__/Library/Logs/imessage-agent/agent.log</string>
+</dict>
+</plist>
