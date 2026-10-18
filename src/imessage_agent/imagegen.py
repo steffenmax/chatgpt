@@ -133,11 +133,15 @@ class ImageQueue:
         sender: Callable[[ImageJob, Path], Awaitable[None]],
         on_failure: Callable[[ImageJob, str], Awaitable[None]],
         before_generate: Callable[[], Awaitable[None]] | None = None,
+        gate: asyncio.Semaphore | None = None,
     ):
         self.generator = generator
         self._sender = sender
         self._on_failure = on_failure
         self._before = before_generate
+        # Shared with the text backend: while held, no LLM reply runs, so the LLM
+        # unloaded by `before_generate` cannot be reloaded mid-generation (RAM).
+        self._gate = gate
         self._queue: asyncio.Queue[ImageJob] = asyncio.Queue()
         self._task: asyncio.Task | None = None
 
@@ -169,9 +173,15 @@ class ImageQueue:
             tmp = Path(tempfile.mkdtemp(prefix="imsg-img-"))
             os.chmod(tmp, 0o700)
             try:
-                if self._before:
-                    await self._before()
-                png = await self.generator.generate(job.prompt, tmp)
+                if self._gate is not None:
+                    await self._gate.acquire()
+                try:
+                    if self._before:
+                        await self._before()
+                    png = await self.generator.generate(job.prompt, tmp)
+                finally:
+                    if self._gate is not None:
+                        self._gate.release()
                 log_event(
                     "image.generated",
                     chat_guid=job.chat_guid,

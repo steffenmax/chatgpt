@@ -73,6 +73,7 @@ class Agent:
         context: ContextStore,
         images: ImageQueue | None,
         resolver: SenderResolver | None = None,
+        llm_gate: asyncio.Semaphore | None = None,
     ):
         self.s = settings
         self.bb = bb
@@ -83,7 +84,8 @@ class Agent:
         self._allowed = set(settings.allowed_chat_guids)
         self._seen: OrderedDict[str, None] = OrderedDict()
         self._unlisted_logged: dict[str, float] = {}
-        self._llm_gate = asyncio.Semaphore(1)
+        # One LLM call at a time; the image queue holds the same gate while generating.
+        self._llm_gate = llm_gate or asyncio.Semaphore(1)
         self._tasks: set[asyncio.Task] = set()
 
     # ------------------------------------------------------------------ intake
