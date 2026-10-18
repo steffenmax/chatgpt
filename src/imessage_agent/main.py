@@ -163,6 +163,7 @@ def _build_agent(settings: Settings) -> Agent:
     llm = build_llm(settings)
     context = ContextStore(max_messages=settings.context_max_messages, ttl_seconds=settings.context_ttl_seconds)
     images: ImageQueue | None = None
+    llm_gate = asyncio.Semaphore(1)
     agent_holder: dict[str, Agent] = {}
 
     if settings.image_enabled:
@@ -192,9 +193,13 @@ def _build_agent(settings: Settings) -> Agent:
             before = None
             if settings.unload_llm_before_image and isinstance(llm, OllamaBackend):
                 before = llm.unload
-            images = ImageQueue(gen, _send, _fail, before_generate=before)
+            images = ImageQueue(gen, _send, _fail, before_generate=before, gate=llm_gate)
 
-    agent = Agent(settings, bb, llm, context, images, resolver=SenderResolver(bb, settings.sender_names))
+    agent = Agent(
+        settings, bb, llm, context, images,
+        resolver=SenderResolver(bb, settings.sender_names),
+        llm_gate=llm_gate,
+    )
     agent_holder["a"] = agent
     return agent
 

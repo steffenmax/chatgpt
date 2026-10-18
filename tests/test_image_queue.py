@@ -96,3 +96,55 @@ async def test_image_failure_notifies():
         await q.stop()
     assert any("didn't come out" in t for _, t in bb.texts)
     assert bb.attachments == []
+
+
+async def test_mention_waits_while_image_generates():
+    """With a shared gate, the LLM is not called while mflux is running (RAM safety)."""
+    s = make_settings()
+    bb, llm = FakeBB(), FakeLLM()
+    ctx = ContextStore(5, 3600)
+    holder = {}
+    events = []
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class SlowGenerator(FakeGenerator):
+        async def generate(self, prompt, workdir):
+            events.append("gen.start")
+            started.set()
+            await release.wait()
+            events.append("gen.end")
+            return await super().generate(prompt, workdir)
+
+    async def send(job, png):
+        await holder["a"].send_image(job, png)
+
+    async def fail(job, reason):
+        await holder["a"].image_failed(job, reason)
+
+    async def unload():
+        events.append("unload")
+
+    gate = asyncio.Semaphore(1)
+    q = ImageQueue(SlowGenerator(), send, fail, before_generate=unload, gate=gate)
+    agent = Agent(
+        s, bb, llm, ctx, images=q,
+        resolver=SenderResolver(None, {}, use_contacts=False),  # type: ignore[arg-type]
+        llm_gate=gate,
+    )
+    holder["a"] = agent
+    q.start()
+    try:
+        await agent.process(message("/image a corgi surfing", guid="i1"))
+        await asyncio.wait_for(started.wait(), timeout=5)
+        mention = asyncio.create_task(agent.process(message(f"{s.bot_name} you there?", guid="m1")))
+        await asyncio.sleep(0.05)
+        assert len(llm.calls) == 0, "LLM must not run while an image is generating"
+        release.set()
+        await asyncio.wait_for(mention, timeout=5)
+        await asyncio.wait_for(q._queue.join(), timeout=5)
+    finally:
+        await q.stop()
+
+    assert len(llm.calls) == 1
+    assert events == ["unload", "gen.start", "gen.end"]
