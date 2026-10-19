@@ -45,6 +45,12 @@ from .task import TaskRunner
 from .triggers import Trigger, detect, help_text
 
 NEW_MESSAGE = "new-message"
+
+
+def _norm_addr(a: str | None) -> str:
+    """Compare iMessage handles loosely: '+1 (973) 555-0191' == '+19735550191'."""
+    a = (a or "").strip().lower()
+    return a if "@" in a else re.sub(r"[^\d+]", "", a)
 _ECHOED_INSTRUCTION = re.compile(r"^\s*\w+\s*:|plain version|confirm that|let(ting)? the chat know|\bthey should\b")
 _REFUSAL = re.compile(r"\b(can'?t|cannot|can not|won'?t|unable|not able|yourself)\b")
 
@@ -124,7 +130,7 @@ class Agent:
         self._task_job: asyncio.Task | None = None
         self._task_chat: str | None = None
         # A question the task agent asked: the next plain message in that chat answers it.
-        self._task_question: tuple[str, asyncio.Future] | None = None
+        self._task_question: tuple[str, asyncio.Future, str | None] | None = None
         # GUIDs of the bot's own messages (from isFromMe webhooks) so an inline reply
         # to one of them counts as talking to the bot.
         self._bot_guids: OrderedDict[str, None] = OrderedDict()
@@ -202,8 +208,9 @@ class Agent:
             return "ignored:empty"
 
         if self._task_question is not None and self._task_question[0] == chat_guid and trigger.kind in ("none", "mention"):
-            fut = self._task_question[1]
-            if not fut.done():
+            chat_q, fut, asker = self._task_question
+            from_addr = (data.get("handle") or {}).get("address") if isinstance(data.get("handle"), dict) else None
+            if not fut.done() and (asker is None or _norm_addr(from_addr) == asker):
                 self._task_question = None
                 fut.set_result(text)
                 log_event("task.answered", chat_guid=chat_guid, chars=len(text))
@@ -254,7 +261,7 @@ class Agent:
             elif trigger.kind == "reminders":
                 await self._handle_reminders(chat_guid)
             elif trigger.kind == "task":
-                await self._handle_task(chat_guid, sender, trigger.arg)
+                await self._handle_task(chat_guid, sender, trigger.arg, address)
         except Exception as exc:  # noqa: BLE001
             log_event("handler.error", chat_guid=chat_guid, kind=trigger.kind, error=exc_name(exc))
             return f"error:{exc_name(exc)}"
@@ -432,7 +439,7 @@ class Agent:
         lines = [f"#{r.id} {describe(datetime.fromtimestamp(r.due).astimezone(), now)}: {r.text} ({r.who})" for r in items[:15]]
         await self._say(chat_guid, "\n".join(lines), remember=False)
 
-    async def _handle_task(self, chat_guid: str, who: str, request: str) -> None:
+    async def _handle_task(self, chat_guid: str, who: str, request: str, address: str | None = None) -> None:
         if self.tasks is None:
             await self._say(chat_guid, "tasks are off on my end", remember=False)
             return
@@ -440,6 +447,12 @@ class Agent:
             log_event("task.refused", chat_guid=chat_guid, reason="not_task_chat")
             await self._say(chat_guid, "tasks only work in the owner's dm for now", remember=False)
             return
+        owners = {_norm_addr(a) for a in self.s.task_owner_addresses}
+        if owners and _norm_addr(address) not in owners:
+            log_event("task.refused", chat_guid=chat_guid, reason="not_owner")
+            await self._say(chat_guid, "only the boss can send me on tasks for now", remember=False)
+            return
+        requester = _norm_addr(address) if owners else None
         if not request.strip():
             await self._say(chat_guid, "give me the job: /task find 3 steakhouses near msg with a table saturday 8pm", remember=False)
             return
@@ -452,12 +465,12 @@ class Agent:
         # the /task line itself is not stored in context, so the last n are all prior chat
         ctx = [f"{'you' if m.from_bot else m.sender}: {m.text}" for m in history[-n:]] if n else []
         self._task_chat = chat_guid
-        self._task_job = asyncio.create_task(self._run_task(chat_guid, who, request.strip(), ctx))
+        self._task_job = asyncio.create_task(self._run_task(chat_guid, who, request.strip(), ctx, requester))
 
-    async def _run_task(self, chat_guid: str, who: str, request: str, ctx: list[str]) -> None:
+    async def _run_task(self, chat_guid: str, who: str, request: str, ctx: list[str], requester: str | None = None) -> None:
         log_event("task.started", chat_guid=chat_guid, chars=len(request))
         try:
-            ask = self._task_asker(chat_guid) if self.s.task_max_questions > 0 else None
+            ask = self._task_asker(chat_guid, requester) if self.s.task_max_questions > 0 else None
             res = await self.tasks.run(request, who, ctx, ask=ask)  # type: ignore[union-attr]
         except asyncio.CancelledError:
             raise
@@ -486,10 +499,10 @@ class Agent:
             except Exception as exc:  # noqa: BLE001
                 log_event("task.attach_failed", chat_guid=chat_guid, error=exc_name(exc))
 
-    def _task_asker(self, chat_guid: str):
+    def _task_asker(self, chat_guid: str, requester: str | None = None):
         async def ask(question: str) -> str | None:
             fut = asyncio.get_running_loop().create_future()
-            self._task_question = (chat_guid, fut)
+            self._task_question = (chat_guid, fut, requester)
             await self._say(chat_guid, f"quick q: {question}", remember=False)
             log_event("task.asked", chat_guid=chat_guid, chars=len(question))
             try:

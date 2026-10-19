@@ -218,3 +218,37 @@ async def test_ask_tool_refuses_credentials_and_limits_questions():
     r = await handlers["ask_chat"]({"question": "what time?"})
     assert "limit" in r["content"][0]["text"] and asked == ["how many people?"]
 
+
+async def test_owner_only_tasks_in_a_group():
+    from tests.conftest import make_settings as ms
+
+    class AskingRunner:
+        def __init__(self):
+            self.answer = None
+
+        async def run(self, request, requester, ctx, ask=None):
+            self.answer = await ask("how many people?")
+            return TaskResult(True, text=f"done for {self.answer}")
+
+    runner = AskingRunner()
+    s = ms(task_chat_guids=[ALLOWED], task_owner_addresses=["+1 (555) 000-1111"])
+    bb = FakeBB()
+    agent = Agent(s, bb, FakeLLM(), ContextStore(10, 3600), images=None,
+                  resolver=SenderResolver(None, {"+15550001111": "Max", "+15550002222": "Mike"}, use_contacts=False), tasks=runner)  # type: ignore[arg-type]
+    # someone else can't start one
+    await agent.process(message("/task find a bar", sender="+15550002222", guid="o1"))
+    assert bb.texts[-1][1] == "only the boss can send me on tasks for now" and agent._task_job is None
+    # the owner can
+    await agent.process(message("/task find a bar", sender="+15550001111", guid="o2"))
+    for _ in range(50):
+        if bb.texts and bb.texts[-1][1].startswith("quick q:"):
+            break
+        await asyncio.sleep(0.01)
+    # Mike's reply doesn't answer the question; it's ordinary chat
+    assert await agent.process(message("like 12 of us lol", sender="+15550002222", guid="o3")) == "stored"
+    assert runner.answer is None
+    # the owner's reply does
+    assert await agent.process(message("5", sender="+15550001111", guid="o4")) == "handled:task_answer"
+    await agent._task_job
+    assert runner.answer == "5" and bb.texts[-1][1] == "done for 5"
+

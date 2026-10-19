@@ -112,6 +112,9 @@ class Settings(BaseSettings):
     # and a sandbox folder. Only from the chats listed in TASK_CHAT_GUIDS. Off by default.
     task_enabled: bool = False
     task_chat_guids: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    # Who may start a task and answer its questions (phone numbers / emails as iMessage
+    # reports them). Empty = anyone in the task chats.
+    task_owner_addresses: Annotated[list[str], NoDecode] = Field(default_factory=list)
     task_dir: str = ""
     task_model: str = ""  # empty = ANTHROPIC_MODEL
     task_max_turns: int = Field(default=25, ge=1, le=200)
@@ -136,7 +139,7 @@ class Settings(BaseSettings):
     # --- logging ---
     log_level: str = "INFO"
 
-    @field_validator("allowed_chat_guids", "task_chat_guids", mode="before")
+    @field_validator("allowed_chat_guids", "task_chat_guids", "task_owner_addresses", mode="before")
     @classmethod
     def _split_guids(cls, v):
         if isinstance(v, str):
