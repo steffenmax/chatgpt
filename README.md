@@ -33,6 +33,7 @@ By default **no message content leaves the machine**. See [Privacy model](#priva
 | A question (`...?`) nobody answers for `QUIET_QUESTION_SECONDS` | Treated as addressed to the bot (off by default) |
 | An inline reply to one of the bot's messages | Treated as talking to the bot, no name needed |
 | Any other message | Sometimes gets a short text reaction (`REACTION_CHANCE`, off by default) |
+| `/remind in 20m <what>`, `/remind at 7pm <what>`, `/remind tomorrow 9am <what>`, `/reminders`, `/remind cancel <n>` | With `REMINDERS_FILE`: posts the reminder in that chat at the time, naming who asked |
 | `/forget` | Wipes that chat's context immediately |
 | `/help` | Lists commands |
 | Anything else | Ignored (but remembered in the rolling context so replies make sense) |
@@ -202,6 +203,7 @@ The LaunchAgent starts at login, restarts on crash (`KeepAlive`), and logs to `~
 | Message text of all chats the bot account is in | Messages.app `chat.db` and BlueBubbles' own SQLite under `~/Library/Application Support/bluebubbles-server` | Apple/BlueBubbles retention; not controlled by this bot | Only via Apple's iMessage delivery (end-to-end encrypted); Messages in iCloud should be off for the bot account |
 | Notes about people and the group (`MEMORY_DIR`, off by default) | Markdown files, one per chat, 0600 | Until you delete or edit them | No |
 | Image prompts with `IMAGE_BACKEND=openai` | Sent to api.openai.com for that one request | OpenAI's retention | Yes, the prompt only |
+| Pending reminders (`REMINDERS_FILE`, off by default) | One JSON file, 0600 | Until they fire or are cancelled | No |
 | Image prompts | RAM; a `0600` temp file in a `0700` temp dir for the duration of one mflux run | Deleted when the job finishes | No, ever |
 | Generated images | Temp dir until sent, then sent through BlueBubbles to iMessage | Deleted right after sending | Only to the chat that asked |
 | Bot replies | Sent through BlueBubbles; kept in RAM context like any other message | As above | Only to the chat |

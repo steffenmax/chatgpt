@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import random
+import re
 import time
 import uuid
+from datetime import datetime, timedelta
 from collections import OrderedDict, deque
 from pathlib import Path
 from typing import Any
@@ -28,6 +30,7 @@ from .llm import (
 )
 from .logsafe import exc_name, log_event
 from .memory import MemoryStore
+from .reminders import MAX_DAYS_AHEAD, Reminder, ReminderStore, describe, parse
 from .triggers import Trigger, detect, help_text
 
 NEW_MESSAGE = "new-message"
@@ -89,6 +92,7 @@ class Agent:
         llm_gate: asyncio.Semaphore | None = None,
         cloud: TextBackend | None = None,
         memory: MemoryStore | None = None,
+        reminders: ReminderStore | None = None,
     ):
         self.s = settings
         self.bb = bb
@@ -97,6 +101,7 @@ class Agent:
         self.cloud = cloud
         # Optional on-disk notes about each chat, maintained by the local model.
         self.memory = memory
+        self.reminders = reminders
         # GUIDs of the bot's own messages (from isFromMe webhooks) so an inline reply
         # to one of them counts as talking to the bot.
         self._bot_guids: OrderedDict[str, None] = OrderedDict()
@@ -193,6 +198,7 @@ class Agent:
                         self.s.bot_name,
                         self.s.image_enabled and self.images is not None,
                         cloud_facts=self.cloud is not None,
+                        reminders=self.reminders is not None,
                     ),
                 )
             elif trigger.kind == "forget":
@@ -205,6 +211,10 @@ class Agent:
                 await self._handle_mention(chat_guid)
             elif trigger.kind == "ask":
                 await self._handle_mention(chat_guid, force_cloud=True)
+            elif trigger.kind == "remind":
+                await self._handle_remind(chat_guid, sender, trigger.arg)
+            elif trigger.kind == "reminders":
+                await self._handle_reminders(chat_guid)
         except Exception as exc:  # noqa: BLE001
             log_event("handler.error", chat_guid=chat_guid, kind=trigger.kind, error=exc_name(exc))
             return f"error:{exc_name(exc)}"
@@ -246,6 +256,44 @@ class Agent:
         if not reply:
             reply = "hm, blanked. say that again?"
         await self._say(chat_guid, reply)
+
+    async def _handle_remind(self, chat_guid: str, who: str, arg: str) -> None:
+        if self.reminders is None:
+            await self._say(chat_guid, "reminders are off on my end", remember=False)
+            return
+        m = re.match(r"^\s*cancel\s+#?(\d+)\s*$", arg, re.IGNORECASE)
+        if m:
+            ok = self.reminders.cancel(chat_guid, int(m.group(1)))
+            await self._say(chat_guid, "dropped it" if ok else "no reminder with that number here", remember=False)
+            return
+        now = datetime.now().astimezone()
+        due, what = parse(arg, now)
+        if due is None or not what.strip():
+            await self._say(chat_guid, "say it like: /remind in 20m call the dentist, or /remind tomorrow 9am venmo joe", remember=False)
+            return
+        if due - now > timedelta(days=MAX_DAYS_AHEAD):
+            await self._say(chat_guid, f"that's too far out, i only do {MAX_DAYS_AHEAD} days", remember=False)
+            return
+        r = self.reminders.add(chat_guid, who, what.strip(), due.timestamp())
+        if r is None:
+            await self._say(chat_guid, "this chat has too many reminders pending, cancel some first", remember=False)
+            return
+        await self._say(chat_guid, f"got it {who}, i'll remind you {describe(due, now)} (#{r.id})", remember=False)
+
+    async def _handle_reminders(self, chat_guid: str) -> None:
+        if self.reminders is None:
+            await self._say(chat_guid, "reminders are off on my end", remember=False)
+            return
+        items = self.reminders.pending(chat_guid)
+        if not items:
+            await self._say(chat_guid, "nothing pending here", remember=False)
+            return
+        now = datetime.now().astimezone()
+        lines = [f"#{r.id} {describe(datetime.fromtimestamp(r.due).astimezone(), now)}: {r.text} ({r.who})" for r in items[:15]]
+        await self._say(chat_guid, "\n".join(lines), remember=False)
+
+    async def fire_reminder(self, r: Reminder) -> None:
+        await self._say(r.chat_guid, f"⏰ {r.who}: {r.text}")
 
     async def _needs_facts(self, history) -> bool:
         """Ask the local model whether the last message needs outside information."""

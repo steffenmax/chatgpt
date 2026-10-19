@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-Kind = Literal["mention", "ask", "image", "help", "forget", "none"]
+Kind = Literal["mention", "ask", "image", "help", "forget", "remind", "reminders", "none"]
 
 
 @dataclass(frozen=True)
@@ -15,7 +15,10 @@ class Trigger:
     arg: str = ""  # image prompt, or the message with the mention left in for chat
 
 
-_COMMANDS = {"/image": "image", "/img": "image", "/ask": "ask", "/help": "help", "/forget": "forget"}
+_COMMANDS = {
+    "/image": "image", "/img": "image", "/ask": "ask", "/help": "help", "/forget": "forget",
+    "/remind": "remind", "/reminders": "reminders",
+}
 
 
 def mention_pattern(bot_name: str) -> re.Pattern[str]:
@@ -56,7 +59,7 @@ def detect(text: str | None, bot_name: str) -> Trigger:
     return Trigger("none")
 
 
-def help_text(bot_name: str, image_enabled: bool, cloud_facts: bool = False) -> str:
+def help_text(bot_name: str, image_enabled: bool, cloud_facts: bool = False, reminders: bool = False) -> str:
     where = "most of it runs on one mac" if cloud_facts else "everything i do runs on one mac, nothing leaves it"
     lines = [
         f"hey, i'm {bot_name}. {where}.",
@@ -66,6 +69,9 @@ def help_text(bot_name: str, image_enabled: bool, cloud_facts: bool = False) -> 
         lines.append("- /ask <question> - i'll look it up online (that one leaves the mac)")
     if image_enabled:
         lines.append("- /image <prompt> - i'll make a picture (takes a bit)")
+    if reminders:
+        lines.append("- /remind in 20m <what>, /remind at 7pm <what>, /remind tomorrow 9am <what> - i'll post it here then")
+        lines.append("- /reminders - what's pending, /remind cancel <n> - drop one")
     lines += [
         "- /forget - wipe what i remember from this chat",
         "- /help - this",

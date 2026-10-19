@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 from .bluebubbles import BlueBubblesClient
 from .config import Settings
 from .memory import MemoryStore
+from .reminders import ReminderStore
 from .context import ContextStore
 from .egress import print_egress_report
 from .handler import Agent, SenderResolver
@@ -85,6 +86,11 @@ def create_app(settings: Settings | None = None, agent: Agent | None = None) -> 
         ag: Agent = app.state.agent
         if ag.images is not None:
             ag.images.start()
+        reminder_task = (
+            asyncio.create_task(ag.reminders.run(ag.fire_reminder), name="reminders")
+            if ag.reminders is not None
+            else None
+        )
         sweeper = asyncio.create_task(
             ag.context.run_sweeper(
                 settings.context_sweep_seconds,
@@ -96,6 +102,8 @@ def create_app(settings: Settings | None = None, agent: Agent | None = None) -> 
             yield
         finally:
             sweeper.cancel()
+            if reminder_task is not None:
+                reminder_task.cancel()
             if ag.images is not None:
                 await ag.images.stop()
             await ag.drain()
@@ -156,6 +164,7 @@ def create_app(settings: Settings | None = None, agent: Agent | None = None) -> 
             "cloud_llm_enabled": settings.cloud_llm_enabled,
             "cloud_facts_enabled": ag.cloud is not None,
             "memory_enabled": ag.memory is not None,
+            "reminders_enabled": ag.reminders is not None,
             "image_backend": settings.image_backend if ag.images else None,
             "image_queue": ag.images.qsize() if ag.images else None,
             "chats_with_context": ag.context.chat_count(),
@@ -233,6 +242,7 @@ def _build_agent(settings: Settings) -> Agent:
         memory=MemoryStore(settings.memory_dir, settings.memory_max_chars, settings.memory_update_every)
         if settings.memory_dir
         else None,
+        reminders=ReminderStore(settings.reminders_file) if settings.reminders_file else None,
     )
     agent_holder["a"] = agent
     return agent

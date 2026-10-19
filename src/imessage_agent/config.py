@@ -45,6 +45,8 @@ class Settings(BaseSettings):
     # Per-chat notes the local model keeps about the people and the group, as markdown
     # files on disk. Empty = off (nothing message-derived is ever written to disk).
     memory_dir: str = ""
+    # /remind support. The JSON file holds reminder text, so this is opt-in like MEMORY_DIR.
+    reminders_file: str = ""
     memory_update_every: int = Field(default=15, ge=1)
     memory_max_chars: int = Field(default=3000, ge=200)
 
