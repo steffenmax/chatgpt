@@ -148,3 +148,36 @@ async def test_mention_waits_while_image_generates():
 
     assert len(llm.calls) == 1
     assert events == ["unload", "gen.start", "gen.end"]
+
+
+async def test_stop_tells_the_chat_about_lost_image_jobs():
+    """A restart mid-generation (and anything still queued) must not fail silently."""
+    s = make_settings()
+    bb, llm = FakeBB(), FakeLLM()
+    ctx = ContextStore(5, 3600)
+    holder = {}
+    started = asyncio.Event()
+
+    class HangingGenerator(FakeGenerator):
+        async def generate(self, prompt, workdir):
+            started.set()
+            await asyncio.sleep(3600)
+
+    async def send(job, png):
+        await holder["a"].send_image(job, png)
+
+    async def fail(job, reason):
+        await holder["a"].image_failed(job, reason)
+
+    q = ImageQueue(HangingGenerator(), send, fail)
+    agent = Agent(s, bb, llm, ctx, images=q, resolver=SenderResolver(None, {}, use_contacts=False))  # type: ignore[arg-type]
+    holder["a"] = agent
+    q.start()
+    await agent.process(message("/image one", guid="s1"))
+    await agent.process(message("/image two", guid="s2"))
+    await asyncio.wait_for(started.wait(), timeout=5)
+    await q.stop()
+    notices = [t for _, t in bb.texts if "restarted" in t]
+    assert len(notices) == 2, bb.texts
+    assert q.qsize() == 0
+

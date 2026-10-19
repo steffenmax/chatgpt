@@ -353,7 +353,11 @@ class Agent:
         log_event("image.sent", chat_guid=job.chat_guid, job_id=job.job_id)
 
     async def image_failed(self, job: ImageJob, reason: str) -> None:
-        await self._say(job.chat_guid, "that image didn't come out, sorry. try again in a bit?", remember=False)
+        if reason == "shutdown":
+            text = "got restarted mid-picture, send that /image again"
+        else:
+            text = "that image didn't come out, sorry. try again in a bit?"
+        await self._say(job.chat_guid, text, remember=False)
 
     async def _say(self, chat_guid: str, text: str, remember: bool = True) -> None:
         await self.bb.send_text(chat_guid, text)

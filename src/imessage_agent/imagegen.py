@@ -95,6 +95,10 @@ class MfluxGenerator:
             proc.kill()
             await proc.wait()
             raise ImageGenError("timeout")
+        except asyncio.CancelledError:
+            proc.kill()
+            await proc.wait()
+            raise
         return proc.returncode or 0, (err or b"").decode(errors="replace")
 
     async def generate(self, prompt: str, workdir: Path) -> Path:
@@ -144,6 +148,7 @@ class ImageQueue:
         self._gate = gate
         self._queue: asyncio.Queue[ImageJob] = asyncio.Queue()
         self._task: asyncio.Task | None = None
+        self._current: ImageJob | None = None
 
     def start(self) -> None:
         if self._task is None:
@@ -157,6 +162,24 @@ class ImageQueue:
             except asyncio.CancelledError:
                 pass
             self._task = None
+        # Whatever was generating or still waiting is lost with this process: say so,
+        # instead of leaving the chat waiting for a picture that never comes.
+        lost: list[ImageJob] = []
+        if self._current is not None:
+            lost.append(self._current)
+            self._current = None
+        while not self._queue.empty():
+            try:
+                lost.append(self._queue.get_nowait())
+                self._queue.task_done()
+            except asyncio.QueueEmpty:
+                break
+        for job in lost:
+            log_event("image.abandoned", chat_guid=job.chat_guid, job_id=job.job_id)
+            try:
+                await self._on_failure(job, "shutdown")
+            except Exception as exc:  # noqa: BLE001
+                log_event("image.failure_notify_failed", chat_guid=job.chat_guid, error=exc_name(exc))
 
     def qsize(self) -> int:
         return self._queue.qsize()
@@ -169,6 +192,7 @@ class ImageQueue:
     async def _worker(self) -> None:
         while True:
             job = await self._queue.get()
+            self._current = job
             started = time.monotonic()
             tmp = Path(tempfile.mkdtemp(prefix="imsg-img-"))
             os.chmod(tmp, 0o700)
@@ -196,5 +220,6 @@ class ImageQueue:
                 except Exception as exc2:  # noqa: BLE001
                     log_event("image.failure_notify_failed", chat_guid=job.chat_guid, error=exc_name(exc2))
             finally:
+                self._current = None
                 shutil.rmtree(tmp, ignore_errors=True)
                 self._queue.task_done()
