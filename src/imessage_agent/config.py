@@ -38,6 +38,15 @@ class Settings(BaseSettings):
     # A message ending in "?" that nobody answers within this many seconds is treated
     # as addressed to the bot. 0 disables.
     quiet_question_seconds: float = Field(default=0.0, ge=0.0)
+    # Occasional short text reactions ("lmaoo", "💀") to ordinary messages. Real iMessage
+    # tapbacks need the BlueBubbles Private API, so these are plain texts. 0 = off.
+    reaction_chance: float = Field(default=0.0, ge=0.0, le=1.0)
+    reaction_cooldown_seconds: float = Field(default=300.0, ge=0.0)
+    # Per-chat notes the local model keeps about the people and the group, as markdown
+    # files on disk. Empty = off (nothing message-derived is ever written to disk).
+    memory_dir: str = ""
+    memory_update_every: int = Field(default=15, ge=1)
+    memory_max_chars: int = Field(default=3000, ge=200)
 
     # --- webhook server (loopback only) ---
     host: str = "127.0.0.1"

@@ -219,3 +219,94 @@ async def test_cloud_failure_falls_back_to_local(clock, caplog):
     assert bb.texts == [(ALLOWED, "yes")]
     assert any("event=llm.cloud_failed" in r.getMessage() and "error=RuntimeError" in r.getMessage() for r in caplog.records)
 
+
+async def test_inline_reply_to_bot_message_counts_as_mention(agent_parts):
+    s, bb, llm, ctx, agent = agent_parts
+    # the bot's own message comes back through the webhook with isFromMe
+    assert await agent.process(message("yo", from_me=True, guid="bot-msg-1")) == "ignored:from_me"
+    # a plain message replying to something else is just stored
+    assert await agent.process(message("nah", guid="r0", threadOriginatorGuid="someone-elses")) == "stored"
+    # an inline reply to the bot's message triggers a reply without the name
+    assert await agent.process(message("why though", guid="r1", threadOriginatorGuid="bot-msg-1")) == "handled:mention"
+    assert len(llm.calls) == 1 and bb.texts == [(ALLOWED, "yo")]
+    # replyToGuid works too
+    assert await agent.process(message("ok", guid="r2", replyToGuid="bot-msg-1")) == "handled:mention"
+    assert len(llm.calls) == 2
+
+
+def _reaction_agent(clock, reply, **over):
+    from imessage_agent.context import ContextStore
+    from tests.conftest import FakeBB, FakeLLM, make_settings
+
+    base = dict(reaction_chance=1.0, reaction_cooldown_seconds=0)
+    base.update(over)
+    s = make_settings(**base)
+    bb, llm = FakeBB(), FakeLLM(reply)
+    ctx = ContextStore(5, 3600, clock=clock)
+    agent = Agent(s, bb, llm, ctx, images=None, resolver=SenderResolver(None, {}, use_contacts=False))  # type: ignore[arg-type]
+    return agent, bb, llm
+
+
+async def test_reaction_sent_when_model_offers_one(clock):
+    agent, bb, llm = _reaction_agent(clock, "\"😂😂\"")
+    assert await agent.process(message("dan fell off the boat", guid="x1")) == "stored"
+    await agent.drain()
+    assert bb.texts == [(ALLOWED, "😂😂")]
+    assert len(llm.calls) == 1
+
+
+async def test_reaction_skipped_on_none_and_long_answers(clock):
+    agent, bb, llm = _reaction_agent(clock, "NONE")
+    await agent.process(message("ok see you at 8", guid="x2"))
+    await agent.drain()
+    assert bb.texts == []
+    agent, bb, llm = _reaction_agent(clock, "this is a whole paragraph of commentary that is far too long to be a reaction")
+    await agent.process(message("ok see you at 8", guid="x3"))
+    await agent.drain()
+    assert bb.texts == []
+
+
+async def test_reaction_respects_cooldown_and_default_off(clock, agent_parts):
+    agent, bb, llm = _reaction_agent(clock, "lmaoo", reaction_cooldown_seconds=3600)
+    await agent.process(message("one", guid="x4"))
+    await agent.process(message("two", guid="x5"))
+    await agent.drain()
+    assert len(bb.texts) == 1
+    s, bb2, llm2, ctx, agent2 = agent_parts
+    assert s.reaction_chance == 0
+    await agent2.process(message("funny thing happened", guid="x6"))
+    await agent2.drain()
+    assert bb2.texts == [] and llm2.calls == []
+
+
+async def test_memory_notes_written_and_injected(clock, tmp_path):
+    from imessage_agent.context import ContextStore
+    from imessage_agent.memory import MemoryStore
+    from tests.conftest import FakeBB, FakeLLM, make_settings
+
+    class RecordingLLM(FakeLLM):
+        def __init__(self):
+            super().__init__("## People\n- Alex: lowercase, dry\n\n## Group\n- rugby jokes")
+            self.systems = []
+
+        async def reply(self, system, messages):
+            self.systems.append(system)
+            return await super().reply(system, messages)
+
+    s = make_settings(memory_dir=str(tmp_path / "mem"), memory_update_every=2)
+    bb, llm = FakeBB(), RecordingLLM()
+    ctx = ContextStore(10, 3600, clock=clock)
+    mem = MemoryStore(s.memory_dir, s.memory_max_chars, s.memory_update_every)
+    agent = Agent(s, bb, llm, ctx, images=None, resolver=SenderResolver(None, {}, use_contacts=False), memory=mem)  # type: ignore[arg-type]
+    await agent.process(message("hey", guid="m1"))
+    await agent.drain()
+    assert not mem.path_for(ALLOWED).exists(), "not yet: every 2nd message"
+    await agent.process(message("rugby tonight", guid="m2"))
+    await agent.drain()
+    path = mem.path_for(ALLOWED)
+    assert path.exists() and (path.stat().st_mode & 0o777) == 0o600
+    assert (path.parent.stat().st_mode & 0o777) == 0o700
+    assert "Alex: lowercase" in path.read_text()
+    # the notes are part of the system prompt for the next mention, but not of the log
+    await agent.process(message("coco what's up", guid="m3"))
+    assert "Alex: lowercase" in llm.systems[-1] and "never read them out" in llm.systems[-1]

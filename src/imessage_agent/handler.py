@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 import time
 import uuid
 from collections import OrderedDict, deque
@@ -16,14 +17,17 @@ from .imagegen import ImageJob, ImageQueue
 from .llm import (
     CLOUD_FACTS_ADDENDUM,
     NEEDS_FACTS_SYSTEM,
+    REACTION_ADDENDUM,
     TextBackend,
     build_messages,
     clean_reply,
     facts_router_messages,
+    parse_reaction,
     parse_yes_no,
 )
 from .logsafe import exc_name, log_event
-from .triggers import detect, help_text
+from .memory import MemoryStore
+from .triggers import Trigger, detect, help_text
 
 NEW_MESSAGE = "new-message"
 
@@ -83,12 +87,19 @@ class Agent:
         resolver: SenderResolver | None = None,
         llm_gate: asyncio.Semaphore | None = None,
         cloud: TextBackend | None = None,
+        memory: MemoryStore | None = None,
     ):
         self.s = settings
         self.bb = bb
         self.llm = llm
         # Optional second backend for questions that need outside information.
         self.cloud = cloud
+        # Optional on-disk notes about each chat, maintained by the local model.
+        self.memory = memory
+        # GUIDs of the bot's own messages (from isFromMe webhooks) so an inline reply
+        # to one of them counts as talking to the bot.
+        self._bot_guids: OrderedDict[str, None] = OrderedDict()
+        self._last_reaction: dict[str, float] = {}
         self.context = context
         self.images = images
         self.resolver = resolver or SenderResolver(bb, settings.sender_names)
@@ -113,9 +124,13 @@ class Agent:
         data = payload.get("data")
         if not isinstance(data, dict):
             return "ignored:malformed"
-        if data.get("isFromMe"):
-            return "ignored:from_me"
         guid = data.get("guid")
+        if data.get("isFromMe"):
+            if isinstance(guid, str) and guid:
+                self._bot_guids[guid] = None
+                while len(self._bot_guids) > 500:
+                    self._bot_guids.popitem(last=False)
+            return "ignored:from_me"
         if isinstance(guid, str) and guid:
             if guid in self._seen:
                 return "ignored:duplicate"
@@ -133,6 +148,10 @@ class Agent:
 
         text = data.get("text") if isinstance(data.get("text"), str) else ""
         trigger = detect(text, self.s.bot_name)
+        reply_to = data.get("threadOriginatorGuid") or data.get("replyToGuid")
+        is_reply_to_bot = trigger.kind == "none" and isinstance(reply_to, str) and reply_to in self._bot_guids
+        if is_reply_to_bot and text:
+            trigger = Trigger("mention", text)
 
         if chat_guid not in self._allowed:
             if trigger.kind != "none":
@@ -149,11 +168,17 @@ class Agent:
             self.context.add(chat_guid, sender, text)
         elif trigger.kind == "ask":
             self.context.add(chat_guid, sender, trigger.arg or text)
+        if trigger.kind in ("none", "mention", "ask"):
+            self._maybe_update_memory(chat_guid)
         if trigger.kind == "none":
-            self._maybe_quiet_question(chat_guid, text)
+            if not self._maybe_quiet_question(chat_guid, text):
+                self._maybe_react(chat_guid)
             return "stored"
 
-        log_event("trigger", chat_guid=chat_guid, kind=trigger.kind)
+        if is_reply_to_bot:
+            log_event("trigger", chat_guid=chat_guid, kind=trigger.kind, reason="reply")
+        else:
+            log_event("trigger", chat_guid=chat_guid, kind=trigger.kind)
         try:
             if trigger.kind == "help":
                 await self._say(
@@ -184,12 +209,12 @@ class Agent:
         history = self.context.get(chat_guid)
         messages = build_messages(self.s.persona, self.s.bot_name, history)
         backend = self.llm
-        system = self.s.persona
+        system = self._system_for(chat_guid)
         if self.cloud is not None:
             reason = "command" if force_cloud else "router"
             if force_cloud or await self._needs_facts(history):
                 backend = self.cloud
-                system = self.s.persona + CLOUD_FACTS_ADDENDUM
+                system = system + CLOUD_FACTS_ADDENDUM
                 log_event("llm.escalate", chat_guid=chat_guid, reason=reason, backend=backend.name)
         started = time.monotonic()
         async with self._llm_gate:
@@ -200,7 +225,7 @@ class Agent:
                     raise
                 # Cloud unavailable (no credits, network, rate limit): answer locally instead.
                 log_event("llm.cloud_failed", chat_guid=chat_guid, backend=backend.name, error=exc_name(exc))
-                backend, system = self.llm, self.s.persona
+                backend, system = self.llm, self._system_for(chat_guid)
                 raw = await backend.reply(system, messages)
         reply = clean_reply(raw, self.s.bot_name)
         log_event(
@@ -224,17 +249,72 @@ class Agent:
             return False
         return parse_yes_no(raw)
 
-    def _maybe_quiet_question(self, chat_guid: str, text: str) -> None:
+    def _system_for(self, chat_guid: str) -> str:
+        """Persona plus whatever notes the bot keeps about this chat."""
+        system = self.s.persona
+        notes = self.memory.load(chat_guid).strip() if self.memory else ""
+        if notes:
+            system += (
+                "\n\nNotes you keep about this chat and the people in it, from earlier conversations "
+                "(use them naturally, never read them out):\n" + notes
+            )
+        return system
+
+    def _spawn(self, coro) -> None:
+        t = asyncio.create_task(coro)
+        self._tasks.add(t)
+        t.add_done_callback(self._tasks.discard)
+
+    def _maybe_quiet_question(self, chat_guid: str, text: str) -> bool:
         """A question nobody answers for a while is treated as addressed to the bot."""
         if self.s.quiet_question_seconds <= 0 or not text.rstrip().endswith("?"):
+            return False
+        history = self.context.get(chat_guid)
+        if not history:
+            return False
+        marker = history[-1]  # the message object just stored
+        self._spawn(self._quiet_question(chat_guid, marker))
+        return True
+
+    def _maybe_react(self, chat_guid: str) -> None:
+        """Sometimes fire a short text reaction, like a friend would."""
+        if self.s.reaction_chance <= 0 or random.random() >= self.s.reaction_chance:
             return
+        now = time.monotonic()
+        if now - self._last_reaction.get(chat_guid, -1e9) < self.s.reaction_cooldown_seconds:
+            return
+        self._last_reaction[chat_guid] = now
+        self._spawn(self._react(chat_guid))
+
+    async def _react(self, chat_guid: str) -> None:
+        history = self.context.get(chat_guid)
+        if not history or history[-1].from_bot:
+            return
+        try:
+            async with self._llm_gate:
+                raw = await self.llm.reply(self._system_for(chat_guid) + REACTION_ADDENDUM,
+                                           build_messages(self.s.persona, self.s.bot_name, history))
+            reaction = parse_reaction(raw)
+            if not reaction:
+                return
+            await self._say(chat_guid, reaction)
+            log_event("reaction.sent", chat_guid=chat_guid, chars=len(reaction))
+        except Exception as exc:  # noqa: BLE001
+            log_event("handler.error", chat_guid=chat_guid, kind="reaction", error=exc_name(exc))
+
+    def _maybe_update_memory(self, chat_guid: str) -> None:
+        if self.memory is not None and self.memory.tick(chat_guid):
+            self._spawn(self._update_memory(chat_guid))
+
+    async def _update_memory(self, chat_guid: str) -> None:
         history = self.context.get(chat_guid)
         if not history:
             return
-        marker = history[-1]  # the message object just stored
-        t = asyncio.create_task(self._quiet_question(chat_guid, marker))
-        self._tasks.add(t)
-        t.add_done_callback(self._tasks.discard)
+        try:
+            async with self._llm_gate:
+                await self.memory.update(chat_guid, self.s.bot_name, history, self.llm)  # type: ignore[union-attr]
+        except Exception as exc:  # noqa: BLE001
+            log_event("memory.update_failed", chat_guid=chat_guid, error=exc_name(exc))
 
     async def _quiet_question(self, chat_guid: str, marker) -> None:
         await asyncio.sleep(self.s.quiet_question_seconds)

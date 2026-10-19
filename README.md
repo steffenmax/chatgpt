@@ -31,6 +31,8 @@ By default **no message content leaves the machine**. See [Privacy model](#priva
 | `/image <prompt>` | Replies "on it", queues a local FLUX job (one at a time), sends the PNG back, deletes the file |
 | `/ask <question>` | Only with `CLOUD_FACTS_ENABLED=true`: answers via the Anthropic API with web search |
 | A question (`...?`) nobody answers for `QUIET_QUESTION_SECONDS` | Treated as addressed to the bot (off by default) |
+| An inline reply to one of the bot's messages | Treated as talking to the bot, no name needed |
+| Any other message | Sometimes gets a short text reaction (`REACTION_CHANCE`, off by default) |
 | `/forget` | Wipes that chat's context immediately |
 | `/help` | Lists commands |
 | Anything else | Ignored (but remembered in the rolling context so replies make sense) |
@@ -198,6 +200,7 @@ The LaunchAgent starts at login, restarts on crash (`KeepAlive`), and logs to `~
 |---|---|---|---|
 | Message text of allowlisted chats | RAM of the bot process (`ContextStore`), max N per chat | Until 6 h idle, `/forget`, or process restart | No (unless cloud text mode is on) |
 | Message text of all chats the bot account is in | Messages.app `chat.db` and BlueBubbles' own SQLite under `~/Library/Application Support/bluebubbles-server` | Apple/BlueBubbles retention; not controlled by this bot | Only via Apple's iMessage delivery (end-to-end encrypted); Messages in iCloud should be off for the bot account |
+| Notes about people and the group (`MEMORY_DIR`, off by default) | Markdown files, one per chat, 0600 | Until you delete or edit them | No |
 | Image prompts | RAM; a `0600` temp file in a `0700` temp dir for the duration of one mflux run | Deleted when the job finishes | No, ever |
 | Generated images | Temp dir until sent, then sent through BlueBubbles to iMessage | Deleted right after sending | Only to the chat that asked |
 | Bot replies | Sent through BlueBubbles; kept in RAM context like any other message | As above | Only to the chat |

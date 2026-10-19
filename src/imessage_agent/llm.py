@@ -34,6 +34,44 @@ CLOUD_FACTS_ADDENDUM = (
 )
 
 
+REACTION_ADDENDUM = (
+    "\n\nRight now you are NOT replying. You are only deciding whether the LAST message deserves a "
+    "quick reaction, the way a friend fires off 'lmaooo', '😂😂', 'wait what', '💀' or 'W'. The default "
+    "is NONE: plans, logistics, questions, money, 'ok', 'see you', and anything ordinary get NONE. React "
+    "only when the message is genuinely funny, wild, a big win or a big L, or begging to be roasted. "
+    "Answer with exactly the word NONE, or the reaction itself: at most 6 words or a few emoji, nothing "
+    "else, no quotes, no explanation."
+)
+
+MEMORY_SYSTEM = (
+    "You keep private notes for {bot_name} about one group chat so {bot_name} can talk to these people "
+    "like it knows them. You get the current notes and the most recent messages. Output the UPDATED "
+    "notes as plain markdown and nothing else, under {max_chars} characters, with exactly these sections: "
+    "'## People' (one bullet per person: how they text, personality tells, what they care about, running "
+    "jokes about them) and '## Group' (dynamics, inside jokes, recurring topics, who ribs whom). Keep what "
+    "is still true, merge new tells, drop stale or trivial stuff, prefer durable traits over one-off events. "
+    "Never include phone numbers, emails, addresses, or anything that looks like a secret, and never copy "
+    "long quotes. If nothing new was learned, output the current notes unchanged."
+)
+
+
+def memory_messages(current_notes: str, history: list[ContextMessage]) -> list[dict[str, str]]:
+    lines = [f"{m.sender}: {m.text}" for m in history]
+    content = (
+        "Current notes:\n" + (current_notes.strip() or "(none yet)") +
+        "\n\nRecent messages:\n" + "\n".join(lines) +
+        "\n\nOutput the updated notes now."
+    )
+    return [{"role": "user", "content": content}]
+
+
+def parse_reaction(text: str) -> str | None:
+    t = _THINK_RE.sub("", text or "").strip().strip('"').strip("'").strip()
+    if not t or t.upper().startswith("NONE") or "\n" in t or len(t) > 40:
+        return None
+    return t
+
+
 def facts_router_messages(history: list[ContextMessage]) -> list[dict[str, str]]:
     """The recent chat as one user turn, for the yes/no router."""
     lines = [f"{m.sender}: {m.text}" for m in history[-8:]]

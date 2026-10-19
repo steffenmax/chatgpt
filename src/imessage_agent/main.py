@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 
 from .bluebubbles import BlueBubblesClient
 from .config import Settings
+from .memory import MemoryStore
 from .context import ContextStore
 from .egress import print_egress_report
 from .handler import Agent, SenderResolver
@@ -154,6 +155,7 @@ def create_app(settings: Settings | None = None, agent: Agent | None = None) -> 
             "llm_backend": ag.llm.name,
             "cloud_llm_enabled": settings.cloud_llm_enabled,
             "cloud_facts_enabled": ag.cloud is not None,
+            "memory_enabled": ag.memory is not None,
             "image_queue": ag.images.qsize() if ag.images else None,
             "chats_with_context": ag.context.chat_count(),
             "allowlisted_chats": len(settings.allowed_chat_guids),
@@ -216,6 +218,9 @@ def _build_agent(settings: Settings) -> Agent:
         resolver=SenderResolver(bb, settings.sender_names),
         llm_gate=llm_gate,
         cloud=build_cloud(settings),
+        memory=MemoryStore(settings.memory_dir, settings.memory_max_chars, settings.memory_update_every)
+        if settings.memory_dir
+        else None,
     )
     agent_holder["a"] = agent
     return agent
