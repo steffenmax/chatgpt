@@ -131,12 +131,9 @@ class Agent:
                 while len(self._bot_guids) > 500:
                     self._bot_guids.popitem(last=False)
             return "ignored:from_me"
-        if isinstance(guid, str) and guid:
-            if guid in self._seen:
-                return "ignored:duplicate"
-            self._seen[guid] = None
-            while len(self._seen) > 1000:
-                self._seen.popitem(last=False)
+        if isinstance(guid, str) and guid and guid in self._seen:
+            log_event("message.ignored", status="duplicate")
+            return "ignored:duplicate"
         if data.get("associatedMessageType") or data.get("itemType"):
             return "ignored:reaction_or_system"
 
@@ -147,6 +144,13 @@ class Agent:
             return "ignored:no_chat"
 
         text = data.get("text") if isinstance(data.get("text"), str) else ""
+        # BlueBubbles delivers the same message more than once, and the first copy can
+        # arrive before the text is populated. Only count a delivery as "seen" once it
+        # carried text, so a later copy with the text still gets handled.
+        if isinstance(guid, str) and guid and text:
+            self._seen[guid] = None
+            while len(self._seen) > 1000:
+                self._seen.popitem(last=False)
         trigger = detect(text, self.s.bot_name)
         reply_to = data.get("threadOriginatorGuid") or data.get("replyToGuid")
         is_reply_to_bot = trigger.kind == "none" and isinstance(reply_to, str) and reply_to in self._bot_guids
@@ -159,6 +163,7 @@ class Agent:
             return "ignored:not_allowlisted"
 
         if not text:
+            log_event("message.ignored", status="empty", chat_guid=chat_guid)
             return "ignored:empty"
 
         address = (data.get("handle") or {}).get("address") if isinstance(data.get("handle"), dict) else None

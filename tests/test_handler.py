@@ -310,3 +310,15 @@ async def test_memory_notes_written_and_injected(clock, tmp_path):
     # the notes are part of the system prompt for the next mention, but not of the log
     await agent.process(message("coco what's up", guid="m3"))
     assert "Alex: lowercase" in llm.systems[-1] and "never read them out" in llm.systems[-1]
+
+
+
+async def test_redelivery_with_text_after_empty_copy_is_handled(agent_parts):
+    """BlueBubbles can send a message twice: first without text, then with it."""
+    s, bb, llm, ctx, agent = agent_parts
+    assert await agent.process(message("", guid="same")) == "ignored:empty"
+    assert await agent.process(message("coco you there", guid="same")) == "handled:mention"
+    assert len(llm.calls) == 1 and len(bb.texts) == 1
+    # a true duplicate (text both times) is still dropped
+    assert await agent.process(message("coco you there", guid="same")) == "ignored:duplicate"
+    assert len(llm.calls) == 1
