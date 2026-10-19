@@ -18,13 +18,17 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable
+from typing import Any, AsyncIterator, Awaitable, Callable
+from urllib.parse import urlparse
 
 from .logsafe import exc_name, log_event
+from .taskbrowser import ReadOnlyBrowser, build_server
 
 FILE_TOOLS = ("Read", "Write", "Edit", "Glob", "Grep")
 WEB_TOOLS = ("WebSearch", "WebFetch")
 TOOLS = [*WEB_TOOLS, *FILE_TOOLS]
+MCP_PREFIX = "mcp__task__"
+MCP_TOOLS = [f"{MCP_PREFIX}browser_open", f"{MCP_PREFIX}browser_follow", f"{MCP_PREFIX}ask_chat"]
 KEEP_DAYS = 14
 
 OPERATOR_PROMPT = (
@@ -34,6 +38,17 @@ OPERATOR_PROMPT = (
     "You can save notes or a document as files in the current directory, and nowhere else. You "
     "cannot run commands, send messages, log in, book, buy, or contact anyone; if the task needs "
     "that, do the research and say exactly what the person should do.\n"
+    "If you have browser tools, use them for pages WebFetch can't render (JavaScript-heavy sites). "
+    "Resy pages render in the browser and can show open times for a date and party size "
+    "(resy.com/cities/<city>/search?query=...&date=YYYY-MM-DD&seats=N); OpenTable and Yelp block it. "
+    "Booking and review sites (OpenTable, Resy, Yelp and the like) often block automated access: "
+    "try a site at most once, don't keep retrying, and get the facts from sources that load "
+    "(search results, the place's own website, news and guides). For anything bookable, give a "
+    "direct link, prefilled with date, time and party size when the site's URL supports it, so "
+    "they can check availability and book themselves.\n"
+    "If you have the ask_chat tool and a detail you truly need is missing (date, time, party size, "
+    "budget, which option), ask one short question. Never ask for passwords, logins, codes or "
+    "payment details; those are always the person's job.\n"
     "Your final answer is texted to the group as-is: plain text, no markdown headings, tables or "
     "bold, short paragraphs or simple dashes, casual friendly tone, under 900 characters. Include "
     "at most 3 links, and only ones you actually opened. If you wrote a longer document, say its "
@@ -62,10 +77,29 @@ def _inside(path: str, root: Path) -> bool:
         return False
 
 
+def _local_url(url: str) -> bool:
+    import ipaddress
+
+    host = (urlparse(url if "://" in url else "https://" + url).hostname or "").lower()
+    if not host or host == "localhost" or host.endswith((".localhost", ".local", ".internal", ".lan", ".home")):
+        return True
+    try:
+        a = ipaddress.ip_address(host)
+        return a.is_private or a.is_loopback or a.is_link_local or a.is_reserved or a.is_unspecified
+    except ValueError:
+        return False
+
+
 def guard_decision(tool_name: str, tool_input: dict[str, Any], root: Path) -> str | None:
     """None to allow, or a reason string to deny."""
+    if tool_name == "WebFetch":
+        if _local_url(str(tool_input.get("url", ""))):
+            return "local and private network addresses are off limits"
+        return None
     if tool_name in WEB_TOOLS:
         return None
+    if tool_name in MCP_TOOLS:
+        return None  # the browser and ask tools enforce their own limits
     if tool_name in FILE_TOOLS:
         for key in ("file_path", "path", "notebook_path"):
             v = tool_input.get(key)
@@ -88,6 +122,9 @@ class TaskRunner:
         max_budget_usd: float = 1.0,
         timeout: float = 600.0,
         query_fn: Callable[..., AsyncIterator[Any]] | None = None,
+        browser: bool = False,
+        max_questions: int = 2,
+        ask_timeout: float = 240.0,
     ):
         self.api_key = api_key
         self.model = model
@@ -96,6 +133,9 @@ class TaskRunner:
         self.max_budget_usd = max_budget_usd
         self.timeout = timeout
         self._query = query_fn  # injected in tests
+        self.use_browser = browser
+        self.max_questions = max_questions
+        self.ask_timeout = ask_timeout
 
     def _prepare(self) -> Path:
         self.root.mkdir(parents=True, exist_ok=True)
@@ -112,7 +152,7 @@ class TaskRunner:
         os.chmod(work, 0o700)
         return work
 
-    def _options(self, work: Path):
+    def _options(self, work: Path, server=None):
         from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
 
         root = self.root
@@ -131,10 +171,10 @@ class TaskRunner:
             model=self.model,
             system_prompt=OPERATOR_PROMPT,
             tools=list(TOOLS),
-            allowed_tools=list(TOOLS),
+            allowed_tools=list(TOOLS) + (list(MCP_TOOLS) if server is not None else []),
             permission_mode="dontAsk",
             setting_sources=[],
-            mcp_servers={},
+            mcp_servers={"task": server} if server is not None else {},
             strict_mcp_config=True,
             cwd=str(work),
             max_turns=self.max_turns,
@@ -149,9 +189,22 @@ class TaskRunner:
             },
         )
 
-    async def run(self, request: str, requester: str, context_lines: list[str]) -> TaskResult:
+    async def run(
+        self, request: str, requester: str, context_lines: list[str],
+        ask: Callable[[str], Awaitable[str | None]] | None = None,
+    ) -> TaskResult:
         started = time.monotonic()
         work = self._prepare()
+        browser = ReadOnlyBrowser() if self.use_browser else None
+        timed_ask = None
+        if ask is not None:
+            async def timed_ask(q: str) -> str | None:
+                try:
+                    return await asyncio.wait_for(ask(q), timeout=self.ask_timeout)
+                except asyncio.TimeoutError:
+                    return None
+        # waiting on the chat doesn't count against the working time
+        budget = self.timeout + (self.ask_timeout * self.max_questions if ask is not None else 0)
         prompt = (
             (("Recent group chat, for context:\n" + "\n".join(context_lines) + "\n\n") if context_lines else "")
             + f"Task from {requester}: {request}"
@@ -161,9 +214,10 @@ class TaskRunner:
             if self._query is None:
                 from claude_agent_sdk import query as sdk_query
 
-                query_fn, options = sdk_query, self._options(work)
+                server = build_server(browser, timed_ask, self.max_questions) if (browser or timed_ask) else None
+                query_fn, options = sdk_query, self._options(work, server)
             else:
-                query_fn, options = self._query, {"cwd": str(work), "root": str(self.root)}
+                query_fn, options = self._query, {"cwd": str(work), "root": str(self.root), "ask": timed_ask}
 
             async def consume():
                 nonlocal result
@@ -171,7 +225,7 @@ class TaskRunner:
                     if type(msg).__name__ == "ResultMessage":
                         result = msg
 
-            await asyncio.wait_for(consume(), timeout=self.timeout)
+            await asyncio.wait_for(consume(), timeout=budget)
         except asyncio.TimeoutError:
             return TaskResult(False, reason="timeout", duration_ms=int((time.monotonic() - started) * 1000))
         except Exception as exc:  # noqa: BLE001
@@ -179,6 +233,9 @@ class TaskRunner:
             return TaskResult(False, reason=exc_name(exc), duration_ms=int((time.monotonic() - started) * 1000))
         finally:
             shutil.rmtree(self.root / ".claude-config" / "projects", ignore_errors=True)  # session transcripts
+            if browser is not None:
+                log_event("task.browser", count=browser.pages_opened)
+                await browser.close()
         dur = int((time.monotonic() - started) * 1000)
         if result is None:
             return TaskResult(False, reason="no_result", duration_ms=dur)

@@ -118,6 +118,11 @@ class Settings(BaseSettings):
     task_max_budget_usd: float = Field(default=1.0, gt=0, le=20)
     task_timeout_seconds: float = Field(default=600.0, gt=0)
     task_context_messages: int = Field(default=15, ge=0, le=100)
+    # Read-only headless Chromium for JavaScript-heavy sites (playwright install chromium).
+    task_browser: bool = False
+    # The agent may stop and ask the requester up to N short questions in the chat.
+    task_max_questions: int = Field(default=2, ge=0, le=5)
+    task_ask_timeout_seconds: float = Field(default=240.0, ge=10)
     anthropic_api_key: str = ""
     anthropic_model: str = "claude-opus-5-5"
     anthropic_max_tokens: int = Field(default=400, ge=1)

@@ -123,6 +123,8 @@ class Agent:
         self.tasks = tasks
         self._task_job: asyncio.Task | None = None
         self._task_chat: str | None = None
+        # A question the task agent asked: the next plain message in that chat answers it.
+        self._task_question: tuple[str, asyncio.Future] | None = None
         # GUIDs of the bot's own messages (from isFromMe webhooks) so an inline reply
         # to one of them counts as talking to the bot.
         self._bot_guids: OrderedDict[str, None] = OrderedDict()
@@ -198,6 +200,14 @@ class Agent:
         if not text:
             log_event("message.ignored", status="empty", chat_guid=chat_guid)
             return "ignored:empty"
+
+        if self._task_question is not None and self._task_question[0] == chat_guid and trigger.kind in ("none", "mention"):
+            fut = self._task_question[1]
+            if not fut.done():
+                self._task_question = None
+                fut.set_result(text)
+                log_event("task.answered", chat_guid=chat_guid, chars=len(text))
+                return "handled:task_answer"
 
         address = (data.get("handle") or {}).get("address") if isinstance(data.get("handle"), dict) else None
         sender = await self.resolver.name_for(address)
@@ -447,7 +457,8 @@ class Agent:
     async def _run_task(self, chat_guid: str, who: str, request: str, ctx: list[str]) -> None:
         log_event("task.started", chat_guid=chat_guid, chars=len(request))
         try:
-            res = await self.tasks.run(request, who, ctx)  # type: ignore[union-attr]
+            ask = self._task_asker(chat_guid) if self.s.task_max_questions > 0 else None
+            res = await self.tasks.run(request, who, ctx, ask=ask)  # type: ignore[union-attr]
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
@@ -474,6 +485,19 @@ class Agent:
                 await self.bb.send_attachment(chat_guid, f, name=f.name)
             except Exception as exc:  # noqa: BLE001
                 log_event("task.attach_failed", chat_guid=chat_guid, error=exc_name(exc))
+
+    def _task_asker(self, chat_guid: str):
+        async def ask(question: str) -> str | None:
+            fut = asyncio.get_running_loop().create_future()
+            self._task_question = (chat_guid, fut)
+            await self._say(chat_guid, f"quick q: {question}", remember=False)
+            log_event("task.asked", chat_guid=chat_guid, chars=len(question))
+            try:
+                return await fut
+            finally:
+                if self._task_question is not None and self._task_question[1] is fut:
+                    self._task_question = None
+        return ask
 
     async def stop_task(self) -> None:
         """On shutdown: cancel a running task and say so."""

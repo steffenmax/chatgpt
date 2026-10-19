@@ -263,6 +263,9 @@ def _build_agent(settings: Settings) -> Agent:
             max_turns=settings.task_max_turns,
             max_budget_usd=settings.task_max_budget_usd,
             timeout=settings.task_timeout_seconds,
+            browser=settings.task_browser,
+            max_questions=settings.task_max_questions,
+            ask_timeout=settings.task_ask_timeout_seconds,
         )
         if settings.task_enabled and settings.anthropic_api_key
         else None,

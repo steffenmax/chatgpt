@@ -68,7 +68,7 @@ class FakeRunner:
     def __init__(self, result: TaskResult, delay=0.0):
         self.result, self.delay, self.calls = result, delay, []
 
-    async def run(self, request, requester, ctx):
+    async def run(self, request, requester, ctx, ask=None):
         self.calls.append((request, requester, ctx))
         await asyncio.sleep(self.delay)
         return self.result
@@ -127,3 +127,94 @@ async def test_task_off_by_default(agent_parts):
     assert agent.tasks is None and s.task_enabled is False
     await agent.process(message("/task anything", guid="w1"))
     assert bb.texts[-1][1] == "tasks are off on my end"
+
+
+def test_webfetch_to_local_addresses_is_denied(tmp_path):
+    root = tmp_path / "tasks"
+    for url in ("http://127.0.0.1:8766/dashboard", "http://localhost:1234/api/v1/ping", "http://192.168.1.1/",
+                "http://10.0.0.5", "http://[::1]:11434", "http://printer.local/"):
+        assert guard_decision("WebFetch", {"url": url}, root), url
+    assert guard_decision("WebFetch", {"url": "https://www.nytimes.com"}, root) is None
+    assert guard_decision("mcp__task__browser_open", {"url": "x"}, root) is None
+    assert guard_decision("mcp__other__thing", {}, root)
+
+
+async def test_browser_url_blocking():
+    from imessage_agent.taskbrowser import url_blocked
+
+    for url in ("http://127.0.0.1:8766/dashboard", "http://localhost/", "file:///etc/passwd", "chrome://settings",
+                "http://192.168.0.10/", "http://[::1]/", "http://169.254.169.254/latest/meta-data", "http://router.lan/"):
+        assert await url_blocked(url), url
+    assert await url_blocked("https://93.184.215.14/") is None  # a public IP literal
+
+
+def test_credential_questions_are_detected():
+    from imessage_agent.taskbrowser import asks_for_credentials as creds
+
+    for q in ("what's your opentable password?", "can you send me the login", "what's the 2FA code", "what's the card number",
+              "send me the verification code", "what's your username", "need your PIN", "what's the CVV"):
+        assert creds(q), q
+    for q in ("what date works for everyone?", "how many people?", "should I keep signing up for the newsletter options?",
+              "budget per person?", "steakhouse or sushi?", "pinot or cab?"):
+        assert not creds(q), q
+
+
+async def test_task_agent_asks_the_chat_and_gets_the_reply():
+    class AskingRunner:
+        def __init__(self):
+            self.answer = None
+
+        async def run(self, request, requester, ctx, ask=None):
+            self.answer = await ask("how many people?")
+            return TaskResult(True, text=f"booked info for {self.answer}")
+
+    runner = AskingRunner()
+    agent, bb = _agent(runner)
+    await agent.process(message("/task find a table", guid="q1"))
+    for _ in range(50):
+        if any(t.startswith("quick q:") for _, t in bb.texts):
+            break
+        await asyncio.sleep(0.01)
+    assert bb.texts[-1] == (ALLOWED, "quick q: how many people?")
+    assert await agent.process(message("5 of us", guid="q2")) == "handled:task_answer"
+    await agent._task_job
+    assert runner.answer == "5 of us" and bb.texts[-1] == (ALLOWED, "booked info for 5 of us")
+    # the answer isn't treated as a normal message afterwards
+    assert await agent.process(message("thanks", guid="q3")) == "stored"
+
+
+async def test_ask_tool_refuses_credentials_and_limits_questions():
+    from imessage_agent.taskbrowser import build_server
+
+    asked = []
+
+    async def ask(q):
+        asked.append(q)
+        return "ok"
+
+    server = build_server(None, ask, max_questions=1)
+    tools = {t.name: t for t in server["instance"]._tool_list} if hasattr(server.get("instance"), "_tool_list") else None
+    # call the tool handlers through the SDK tool objects
+    from imessage_agent import taskbrowser
+    import claude_agent_sdk
+
+    handlers = {}
+    orig = claude_agent_sdk.create_sdk_mcp_server
+
+    def capture(name, version="1.0.0", tools=None):
+        for t in tools or []:
+            handlers[t.name] = t.handler
+        return orig(name, version, tools)
+
+    claude_agent_sdk.create_sdk_mcp_server = capture
+    try:
+        build_server(None, ask, max_questions=1)
+    finally:
+        claude_agent_sdk.create_sdk_mcp_server = orig
+    r = await handlers["ask_chat"]({"question": "what's your opentable password?"})
+    assert r.get("is_error") and asked == []
+    r = await handlers["ask_chat"]({"question": "how many people?"})
+    assert "Their reply: ok" in r["content"][0]["text"] and asked == ["how many people?"]
+    r = await handlers["ask_chat"]({"question": "what time?"})
+    assert "limit" in r["content"][0]["text"] and asked == ["how many people?"]
+
