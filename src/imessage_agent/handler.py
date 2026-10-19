@@ -16,6 +16,7 @@ from .context import ContextStore
 from .imagegen import ImageJob, ImageQueue
 from .llm import (
     CLOUD_FACTS_ADDENDUM,
+    LOOKUP_NOTICES,
     NEEDS_FACTS_SYSTEM,
     REACTION_ADDENDUM,
     TextBackend,
@@ -221,6 +222,8 @@ class Agent:
                 backend = self.cloud
                 system = system + CLOUD_FACTS_ADDENDUM
                 log_event("llm.escalate", chat_guid=chat_guid, reason=reason, backend=backend.name)
+                # Say so first: the lookup takes 10-20 s and silence reads as ignoring them.
+                await self._say(chat_guid, random.choice(LOOKUP_NOTICES), remember=False)
         started = time.monotonic()
         async with self._llm_gate:
             try:

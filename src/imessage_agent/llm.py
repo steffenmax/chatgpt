@@ -28,10 +28,20 @@ NEEDS_FACTS_SYSTEM = (
 CLOUD_FACTS_ADDENDUM = (
     "\n\nFor this reply you have a web search tool. Use it when the question needs current or "
     "precise facts (scores, schedules, news, prices, weather, stats); one or two quick searches "
-    "are enough. Then answer in the same short texting style described above: facts first, no "
-    "markdown, no links unless someone asks for one, and name the source in a few words only if "
-    "it matters."
+    "are enough. You already told the chat you were going to look it up, so come straight back "
+    "with what you found, in the same short texting style described above and fully in character: "
+    "facts first, then the bit, no markdown, no links unless someone asks for one, and name the "
+    "source in a few words only if it matters."
 )
+
+# Sent before a cloud lookup so the chat knows the pause is on purpose.
+LOOKUP_NOTICES = [
+    "hold on, gotta look that up",
+    "one sec, lemme check that",
+    "gimme a minute, i'll find out",
+    "not off the top of my head, checking",
+    "hang on, looking it up",
+]
 
 
 REACTION_ADDENDUM = (

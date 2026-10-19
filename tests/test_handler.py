@@ -167,7 +167,9 @@ async def test_mention_routed_to_cloud_when_router_says_yes(clock):
     assert len(local.calls) == 1, "local model is asked only the yes/no question"
     assert local.calls[0][0]["content"].endswith("yes or no.")
     assert len(cloud.calls) == 1
-    assert bb.texts == [(ALLOWED, "from the cloud")]
+    assert len(bb.texts) == 2, "a 'looking it up' notice, then the answer"
+    assert "look" in bb.texts[0][1] or "check" in bb.texts[0][1] or "find out" in bb.texts[0][1]
+    assert bb.texts[1] == (ALLOWED, "from the cloud")
 
 
 async def test_mention_stays_local_when_router_says_no(clock):
@@ -185,7 +187,7 @@ async def test_ask_command_always_goes_to_cloud(clock):
     assert len(cloud.calls) == 1
     # the question itself (without the slash command) is what the cloud model sees
     assert cloud.calls[0][-1]["content"].endswith("what time is kickoff")
-    assert bb.texts == [(ALLOWED, "from the cloud")]
+    assert len(bb.texts) == 2 and bb.texts[1] == (ALLOWED, "from the cloud")
 
 
 async def test_ask_without_cloud_falls_back_to_local(agent_parts):
@@ -216,7 +218,7 @@ async def test_cloud_failure_falls_back_to_local(clock, caplog):
         assert await agent.process(message("coco who won last night?", guid="f1")) == "handled:mention"
     assert len(cloud.calls) == 1
     assert len(local.calls) == 2, "router call, then the local reply after the cloud failed"
-    assert bb.texts == [(ALLOWED, "yes")]
+    assert len(bb.texts) == 2 and bb.texts[1] == (ALLOWED, "yes")
     assert any("event=llm.cloud_failed" in r.getMessage() and "error=RuntimeError" in r.getMessage() for r in caplog.records)
 
 
