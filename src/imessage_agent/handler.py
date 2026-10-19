@@ -28,6 +28,7 @@ from .llm import (
     build_messages,
     clean_reply,
     intent_messages,
+    looks_like_image_request,
     parse_intent,
     parse_reaction,
 )
@@ -300,6 +301,9 @@ class Agent:
             return Intent()
         intent = parse_intent(raw)
         if intent.action == "lookup" and self.cloud is None:
+            return Intent()
+        if intent.action == "image" and not looks_like_image_request(history[-1].text):
+            log_event("intent.vetoed", kind="image")
             return Intent()
         return intent
 

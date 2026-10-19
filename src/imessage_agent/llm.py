@@ -99,8 +99,11 @@ INTENT_SYSTEM = (
     "recent chat; the LAST message is addressed to {bot_name}. Decide what {bot_name} should do and "
     "answer ONLY with JSON matching the schema.\n"
     "actions:\n"
-    "- \"image\": they want a picture/image/photo/drawing made. Put a clean, vivid image prompt in "
-    "\"prompt\" (what to draw, not the chat wording).\n"
+    "- \"image\": ONLY when the LAST message directly asks {bot_name} to make/draw/generate/send a "
+    "picture. Talking about pictures, reacting to one, joking that {bot_name} will make another, or "
+    "asking what a picture looked like is NOT a request: that is chat. Put the requester's own "
+    "description in \"prompt\", cleaned up (drop the bot's name and the asking words), without "
+    "inventing extra scenes, styles or characters they did not mention.\n"
     "- \"remind\": they want to be reminded of something later. Put the time phrase exactly as said "
     "in \"when\" (e.g. \"in 20m\", \"at 7pm\", \"tomorrow 9am\", \"sat 3pm\") and the thing in \"what\".\n"
     "- \"lookup\": answering needs current or outside information (scores, schedules, news, prices, "
@@ -128,6 +131,25 @@ class Intent:
     prompt: str = ""
     when: str = ""
     what: str = ""
+
+
+_IMAGE_VERB = r"\b(make|draw|generate|create|render|paint|sketch|send|show|give|cook up|whip up|do|gimme|get)\b"
+_IMAGE_NOUN = r"\b(pic|pics|picture|pictures|photo|photos|image|images|drawing|drawings|painting|art|portrait|render|meme|wallpaper|logo|poster)\b"
+
+
+def looks_like_image_request(text: str) -> bool:
+    """Deterministic gate on top of the dispatcher: an explicit ask for a picture.
+
+    Requires a request verb and a picture noun in the same message, and refuses plain
+    commentary ("that pic was bad", "it's gonna make another one").
+    """
+    t = (text or "").lower()
+    drawing_verb = re.search(r"\b(draw|paint|sketch|illustrate)\b", t) is not None  # verbs that imply a picture
+    if not drawing_verb and not (re.search(_IMAGE_NOUN, t) and re.search(_IMAGE_VERB, t)):
+        return False
+    if re.search(r"\b(gonna|going to|will|about to|another one|again\??$|that (pic|picture|photo|image)|the (pic|picture|photo|image) (was|is|looks))\b", t) and not re.search(r"\b(can|could|please|pls|plz|\?)", t):
+        return False
+    return True
 
 
 def intent_messages(history: list[ContextMessage]) -> list[dict[str, str]]:

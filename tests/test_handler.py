@@ -424,3 +424,34 @@ async def test_voice_acks_use_the_model_and_fall_back(clock):
     await agent.process(message("/forget", guid="v2"))
     assert bb.texts == [(ALLOWED, "done, wiped everything i had from this chat")]
 
+
+async def test_dispatcher_image_choice_is_vetoed_without_an_explicit_ask(clock):
+    from imessage_agent.context import ContextStore
+    from imessage_agent.imagegen import ImageQueue
+    from tests.conftest import FakeBB, make_settings
+    from tests.test_image_queue import FakeGenerator
+
+    s = make_settings()
+    bb = FakeBB()
+    llm = RoutingLLM('{"action": "image", "prompt": "doug again"}', "lol yeah")
+    ctx = ContextStore(5, 3600, clock=clock)
+    holder = {}
+
+    async def send(job, png):
+        await holder["a"].send_image(job, png)
+
+    async def fail(job, reason):
+        await holder["a"].image_failed(job, reason)
+
+    gen = FakeGenerator()
+    q = ImageQueue(gen, send, fail)
+    agent = Agent(s, bb, llm, ctx, images=q, resolver=SenderResolver(None, {}, use_contacts=False))  # type: ignore[arg-type]
+    holder["a"] = agent
+    q.start()
+    try:
+        assert await agent.process(message("coco it's gonna make another picture of doug", guid="g1")) == "handled:mention"
+        await asyncio.sleep(0.05)
+    finally:
+        await q.stop()
+    assert gen.prompts == [] and bb.texts == [(ALLOWED, "lol yeah")]
+

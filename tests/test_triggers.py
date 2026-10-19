@@ -70,3 +70,19 @@ def test_parse_intent():
     assert parse_intent('{"action": "nuke"}').action == "chat"
     assert parse_intent("garbage").action == "chat"
 
+
+def test_image_request_gate():
+    from imessage_agent.llm import looks_like_image_request as ok
+
+    assert ok("ricky make a picture of a corgi surfing")
+    assert ok("Ricky can u draw joe as a knight")
+    assert ok("ricky send me a pic of doug")
+    assert ok("ricky gimme a meme about mike")
+    assert ok("ricky could you generate an image of the beach?")
+    assert not ok("it's gonna generate another picture of doug")
+    assert not ok("that pic was terrible ricky")
+    assert not ok("ricky the picture looks like my uncle")
+    assert not ok("ricky what did the picture look like")
+    assert not ok("ricky roast joe")
+    assert not ok("seriously concerned with this whole doug thing")
+
