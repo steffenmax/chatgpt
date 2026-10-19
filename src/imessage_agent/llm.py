@@ -224,6 +224,63 @@ def build_messages(persona: str, bot_name: str, history: list[ContextMessage]) -
     return msgs
 
 
+SELF_ONLY_RULE = (
+    "\n\nWrite only your own next message. Never write lines for anyone else in the chat, never "
+    "start with a name and a colon, and never post links you haven't seen in the chat."
+)
+
+_URL = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
+
+
+def speaker_names(history: list[ContextMessage], bot_name: str) -> list[str]:
+    """First names of everyone in the history, plus the bot, lowercased."""
+    names = {bot_name.strip().split()[0].lower()} if bot_name.strip() else set()
+    for m in history:
+        if not m.from_bot and m.sender and m.sender[0].isalpha():
+            names.add(m.sender.strip().split()[0].lower())
+    return sorted(names)
+
+
+def stop_sequences(names: list[str]) -> list[str]:
+    """Cut generation as soon as the model starts writing another speaker's line."""
+    out = []
+    for n in names:
+        for v in (n, n.capitalize()):
+            out.append(f"\n{v}:")
+    return out[:20]
+
+
+def fix_speaker(reply: str, names: list[str], bot_name: str) -> tuple[str, bool]:
+    """Remove transcript-style lines written as other people.
+
+    Returns (text, impersonated). `impersonated` is True when the reply itself opens
+    as someone else ("max: ..."): the caller should retry rather than post it.
+    """
+    bot = bot_name.strip().split()[0].lower() if bot_name.strip() else ""
+    others = [n for n in names if n != bot]
+    if not others:
+        return reply, False
+    pat = re.compile(r"^\s*(" + "|".join(map(re.escape, others)) + r")\s*:", re.IGNORECASE)
+    lines = reply.split("\n")
+    if pat.match(lines[0]):
+        return reply, True
+    kept = []
+    for line in lines:
+        if pat.match(line):
+            break  # everything after the first line written as someone else is a continuation
+        kept.append(line)
+    return "\n".join(kept).strip(), False
+
+
+def strip_unseen_urls(reply: str, seen_text: str) -> str:
+    """Drop links the model invented (a local model can't browse)."""
+    def repl(m):
+        url = m.group(0).rstrip(".,!?)\"'")
+        return m.group(0) if url in seen_text else ""
+    out = _URL.sub(repl, reply)
+    return re.sub(r"[ \t]{2,}", " ", out).strip()
+
+
 def clean_reply(text: str, bot_name: str) -> str:
     text = _THINK_RE.sub("", text).strip()
     # Some models echo a "Name:" prefix the way the history is formatted.
@@ -262,14 +319,14 @@ class OllamaBackend:
         self.num_ctx = num_ctx
         self._client = httpx.AsyncClient(base_url=self.base_url, timeout=timeout)
 
-    async def reply(self, system: str, messages: list[dict[str, str]]) -> str:
-        return await self._chat(system, messages)
+    async def reply(self, system: str, messages: list[dict[str, str]], stop: list[str] | None = None) -> str:
+        return await self._chat(system, messages, stop=stop)
 
     async def structured(self, system: str, messages: list[dict[str, str]], schema: dict[str, Any]) -> str:
         """Ask for JSON matching `schema` (Ollama constrained decoding), deterministic."""
         return await self._chat(system, messages, fmt=schema, temperature=0.0, max_tokens=200)
 
-    async def _chat(self, system, messages, fmt=None, temperature=None, max_tokens=None) -> str:
+    async def _chat(self, system, messages, fmt=None, temperature=None, max_tokens=None, stop=None) -> str:
         payload = {
             "model": self.model,
             "messages": [{"role": "system", "content": system}, *messages],
@@ -283,6 +340,8 @@ class OllamaBackend:
         }
         if fmt is not None:
             payload["format"] = fmt
+        if stop:
+            payload["options"]["stop"] = stop
         r = await self._client.post("/api/chat", json=payload)
         r.raise_for_status()
         data = r.json()

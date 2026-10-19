@@ -500,3 +500,86 @@ async def test_voice_ack_rejects_role_confused_echoes(clock, tmp_path):
         await agent.process(message("/remind in 45m call mom", guid=f"ec{i}"))
         assert bb.texts[-1][1] == plain, said
 
+
+
+class SeqLLM:
+    """Dispatcher gets chat; replies come from `replies` in order (last one repeats)."""
+
+    name = "fake"
+
+    def __init__(self, replies):
+        self.replies, self.calls, self.systems = list(replies), [], []
+
+    async def reply(self, system, messages):
+        if "dispatcher" in system:
+            return '{"action": "chat"}'
+        self.calls.append(messages)
+        self.systems.append(system)
+        return self.replies.pop(0) if len(self.replies) > 1 else self.replies[0]
+
+    async def healthy(self):
+        return True
+
+    async def aclose(self):
+        pass
+
+
+def _seq_agent(clock, replies):
+    from imessage_agent.context import ContextStore
+    from tests.conftest import FakeBB, make_settings
+
+    s = make_settings()
+    bb, llm = FakeBB(), SeqLLM(replies)
+    agent = Agent(s, bb, llm, ContextStore(10, 3600, clock=clock), images=None,
+                  resolver=SenderResolver(None, {"+15550001111": "Max", "+15550002222": "Mike"}, use_contacts=False))  # type: ignore[arg-type]
+    return agent, bb, llm
+
+
+async def test_reply_written_as_a_member_is_retried(clock):
+    agent, bb, llm = _seq_agent(clock, ["max: shut up joe what is that", "nah max, that's on you"])
+    await agent.process(message("yo", sender="+15550002222", guid="i0"))
+    assert await agent.process(message("coco say something", guid="i1")) == "handled:mention"
+    assert bb.texts == [(ALLOWED, "nah max, that's on you")]
+    assert len(llm.calls) == 2 and "Never write lines for anyone else" in llm.systems[0]
+
+
+async def test_reply_still_impersonating_after_retry_loses_the_label(clock):
+    agent, bb, llm = _seq_agent(clock, ["Mike: bro dont go there"])
+    await agent.process(message("yo", sender="+15550002222", guid="j0"))
+    await agent.process(message("coco thoughts", guid="j1"))
+    assert bb.texts == [(ALLOWED, "bro dont go there")]
+
+
+async def test_transcript_continuation_is_cut(clock):
+    agent, bb, llm = _seq_agent(clock, ["lmao that's rough\nMike: nah it's funny\nMax: ok"])
+    await agent.process(message("yo", sender="+15550002222", guid="k0"))
+    await agent.process(message("coco thoughts", guid="k1"))
+    assert bb.texts == [(ALLOWED, "lmao that's rough")]
+
+
+async def test_made_up_links_are_removed_but_seen_links_kept(clock):
+    agent, bb, llm = _seq_agent(clock, ["check this https://www.tiktok.com/t/ZTRfake123/ lol"])
+    await agent.process(message("coco send a tiktok", guid="l1"))
+    assert bb.texts[-1] == (ALLOWED, "check this lol")
+    agent, bb, llm = _seq_agent(clock, ["yeah https://example.com/real is great"])
+    await agent.process(message("look at https://example.com/real", sender="+15550002222", guid="l2"))
+    await agent.process(message("coco thoughts on that link", guid="l3"))
+    assert bb.texts[-1] == (ALLOWED, "yeah https://example.com/real is great")
+    agent, bb, llm = _seq_agent(clock, ["https://www.tiktok.com/t/ZTRfake999/"])
+    await agent.process(message("coco send a tiktok", guid="l4"))
+    assert bb.texts[-1][1].startswith("can't pull up links")
+
+
+def test_speaker_helpers():
+    from imessage_agent.context import ContextMessage
+    from imessage_agent.llm import fix_speaker, speaker_names, stop_sequences, strip_unseen_urls
+
+    hist = [ContextMessage("Max", "hi", 0.0), ContextMessage("Mike Schiavello", "yo", 0.0), ContextMessage("+15551234567", "x", 0.0)]
+    names = speaker_names(hist, "Ricky")
+    assert names == ["max", "mike", "ricky"]
+    assert "\nMax:" in stop_sequences(names) and "\nmike:" in stop_sequences(names)
+    assert fix_speaker("max: hey", names, "Ricky") == ("max: hey", True)
+    assert fix_speaker("ok cool\nmike: no", names, "Ricky") == ("ok cool", False)
+    assert fix_speaker("note: max is late", names, "Ricky") == ("note: max is late", False)
+    assert strip_unseen_urls("see www.fake.com/x now", "") == "see now"
+    assert strip_unseen_urls("see https://a.com/b.", "https://a.com/b") == "see https://a.com/b."

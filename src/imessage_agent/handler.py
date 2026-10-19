@@ -22,16 +22,22 @@ from .llm import (
     INTENT_SYSTEM,
     LOOKUP_NOTICES,
     REACTION_ADDENDUM,
+    SELF_ONLY_RULE,
     VOICE_SYSTEM_SUFFIX,
     Intent,
     TextBackend,
     build_messages,
     clean_reply,
+    fix_speaker,
     intent_messages,
     looks_like_image_request,
     parse_intent,
     parse_reaction,
+    speaker_names,
+    stop_sequences,
+    strip_unseen_urls,
 )
+from .llm import OllamaBackend
 from .logsafe import exc_name, log_event
 from .memory import MemoryStore
 from .reminders import MAX_DAYS_AHEAD, Reminder, ReminderStore, describe, parse
@@ -265,18 +271,40 @@ class Agent:
             log_event("llm.escalate", chat_guid=chat_guid, reason=reason, backend=backend.name)
             # Say so first: the lookup takes 10-20 s and silence reads as ignoring them.
             await self._say(chat_guid, random.choice(LOOKUP_NOTICES), remember=False)
+        names = speaker_names(history, self.s.bot_name)
+        stops = stop_sequences(names)
+
+        async def ask(b, sys_prompt):
+            if isinstance(b, OllamaBackend):
+                return await b.reply(sys_prompt + SELF_ONLY_RULE, messages, stop=stops)
+            return await b.reply(sys_prompt + SELF_ONLY_RULE, messages)
+
         started = time.monotonic()
         async with self._llm_gate:
             try:
-                raw = await backend.reply(system, messages)
+                raw = await ask(backend, system)
             except Exception as exc:  # noqa: BLE001
                 if backend is self.llm:
                     raise
                 # Cloud unavailable (no credits, network, rate limit): answer locally instead.
                 log_event("llm.cloud_failed", chat_guid=chat_guid, backend=backend.name, error=exc_name(exc))
                 backend, system = self.llm, self._system_for(chat_guid)
-                raw = await backend.reply(system, messages)
-        reply = clean_reply(raw, self.s.bot_name)
+                raw = await ask(backend, system)
+            reply, impersonated = fix_speaker(clean_reply(raw, self.s.bot_name), names, self.s.bot_name)
+            if impersonated:
+                # It wrote a line as one of the members: ask once more, then strip the label.
+                log_event("reply.impersonation", chat_guid=chat_guid, attempt=1)
+                raw = await ask(backend, system + f"\n\nYou are {self.s.bot_name}. Reply as {self.s.bot_name} only.")
+                reply, impersonated = fix_speaker(clean_reply(raw, self.s.bot_name), names, self.s.bot_name)
+                if impersonated:
+                    log_event("reply.impersonation", chat_guid=chat_guid, attempt=2)
+                    reply = re.sub(r"^\s*\w+\s*:\s*", "", reply.split("\n")[0]).strip()
+        if backend is self.llm:
+            seen = "\n".join(m.text for m in history)
+            stripped = strip_unseen_urls(reply, seen)
+            if stripped != reply:
+                log_event("reply.links_removed", chat_guid=chat_guid)
+                reply = stripped or "can't pull up links from here, look it up yourself"
         log_event(
             "llm.reply",
             chat_guid=chat_guid,
