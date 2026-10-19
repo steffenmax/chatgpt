@@ -103,6 +103,8 @@ def build_router(settings: Settings) -> APIRouter:
                 "memory_update_every": settings.memory_update_every,
                 "reminders": bool(ag.reminders), "reminders_file": settings.reminders_file or None,
                 "voice_acks": settings.voice_acks,
+                "task": bool(ag.tasks), "task_chats": len(settings.task_chat_guids),
+                "task_budget_usd": settings.task_max_budget_usd,
                 "context_max_messages": settings.context_max_messages,
                 "context_ttl_hours": round(settings.context_ttl_seconds / 3600, 1),
             },

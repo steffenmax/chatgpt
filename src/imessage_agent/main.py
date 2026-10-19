@@ -15,6 +15,7 @@ from .bluebubbles import BlueBubblesClient
 from .config import Settings
 from .memory import MemoryStore
 from .reminders import ReminderStore
+from .task import TaskRunner
 from .vision import OllamaVision
 from .context import ContextStore
 from .egress import print_egress_report
@@ -107,6 +108,7 @@ def create_app(settings: Settings | None = None, agent: Agent | None = None) -> 
                 reminder_task.cancel()
             if ag.images is not None:
                 await ag.images.stop()
+            await ag.stop_task()
             await ag.drain()
             ag.context.forget_all()  # context never survives a restart
             if app.state.owns_agent:
@@ -172,6 +174,7 @@ def create_app(settings: Settings | None = None, agent: Agent | None = None) -> 
             "memory_enabled": ag.memory is not None,
             "reminders_enabled": ag.reminders is not None,
             "vision_enabled": ag.vision is not None,
+            "task_enabled": ag.tasks is not None,
             "image_backend": settings.image_backend if ag.images else None,
             "image_queue": ag.images.qsize() if ag.images else None,
             "chats_with_context": ag.context.chat_count(),
@@ -252,6 +255,16 @@ def _build_agent(settings: Settings) -> Agent:
         reminders=ReminderStore(settings.reminders_file) if settings.reminders_file else None,
         vision=OllamaVision(settings.ollama_url, settings.vision_model, settings.vision_max_width, settings.vision_keep_alive)
         if settings.vision_model
+        else None,
+        tasks=TaskRunner(
+            api_key=settings.anthropic_api_key,
+            model=settings.task_model or settings.anthropic_model,
+            root=settings.task_dir or "~/Library/Application Support/imessage-agent/tasks",
+            max_turns=settings.task_max_turns,
+            max_budget_usd=settings.task_max_budget_usd,
+            timeout=settings.task_timeout_seconds,
+        )
+        if settings.task_enabled and settings.anthropic_api_key
         else None,
     )
     agent_holder["a"] = agent

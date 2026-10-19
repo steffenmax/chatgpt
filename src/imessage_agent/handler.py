@@ -41,6 +41,7 @@ from .llm import OllamaBackend
 from .logsafe import exc_name, log_event
 from .memory import MemoryStore
 from .reminders import MAX_DAYS_AHEAD, Reminder, ReminderStore, describe, parse
+from .task import TaskRunner
 from .triggers import Trigger, detect, help_text
 
 NEW_MESSAGE = "new-message"
@@ -106,6 +107,7 @@ class Agent:
         memory: MemoryStore | None = None,
         reminders: ReminderStore | None = None,
         vision=None,
+        tasks: TaskRunner | None = None,
     ):
         self.s = settings
         self.bb = bb
@@ -117,6 +119,10 @@ class Agent:
         self.reminders = reminders
         # Optional local vision model: photos people send become short captions in context.
         self.vision = vision
+        # Optional /task agent (Claude Agent SDK); one job at a time, owner chats only.
+        self.tasks = tasks
+        self._task_job: asyncio.Task | None = None
+        self._task_chat: str | None = None
         # GUIDs of the bot's own messages (from isFromMe webhooks) so an inline reply
         # to one of them counts as talking to the bot.
         self._bot_guids: OrderedDict[str, None] = OrderedDict()
@@ -220,6 +226,7 @@ class Agent:
                         self.s.image_enabled and self.images is not None,
                         cloud_facts=self.cloud is not None,
                         reminders=self.reminders is not None,
+                        task=self.tasks is not None and chat_guid in self.s.task_chat_guids,
                     ),
                 )
             elif trigger.kind == "forget":
@@ -236,6 +243,8 @@ class Agent:
                 await self._handle_remind(chat_guid, sender, trigger.arg)
             elif trigger.kind == "reminders":
                 await self._handle_reminders(chat_guid)
+            elif trigger.kind == "task":
+                await self._handle_task(chat_guid, sender, trigger.arg)
         except Exception as exc:  # noqa: BLE001
             log_event("handler.error", chat_guid=chat_guid, kind=trigger.kind, error=exc_name(exc))
             return f"error:{exc_name(exc)}"
@@ -412,6 +421,75 @@ class Agent:
         now = datetime.now().astimezone()
         lines = [f"#{r.id} {describe(datetime.fromtimestamp(r.due).astimezone(), now)}: {r.text} ({r.who})" for r in items[:15]]
         await self._say(chat_guid, "\n".join(lines), remember=False)
+
+    async def _handle_task(self, chat_guid: str, who: str, request: str) -> None:
+        if self.tasks is None:
+            await self._say(chat_guid, "tasks are off on my end", remember=False)
+            return
+        if chat_guid not in self.s.task_chat_guids:
+            log_event("task.refused", chat_guid=chat_guid, reason="not_task_chat")
+            await self._say(chat_guid, "tasks only work in the owner's dm for now", remember=False)
+            return
+        if not request.strip():
+            await self._say(chat_guid, "give me the job: /task find 3 steakhouses near msg with a table saturday 8pm", remember=False)
+            return
+        if self._task_job is not None and not self._task_job.done():
+            await self._say(chat_guid, "already working on one, hold on", remember=False)
+            return
+        await self._say_in_voice(chat_guid, "on it, gimme a few minutes to dig into that properly", "on it, gimme a few minutes")
+        history = self.context.get(chat_guid)
+        n = self.s.task_context_messages
+        # the /task line itself is not stored in context, so the last n are all prior chat
+        ctx = [f"{'you' if m.from_bot else m.sender}: {m.text}" for m in history[-n:]] if n else []
+        self._task_chat = chat_guid
+        self._task_job = asyncio.create_task(self._run_task(chat_guid, who, request.strip(), ctx))
+
+    async def _run_task(self, chat_guid: str, who: str, request: str, ctx: list[str]) -> None:
+        log_event("task.started", chat_guid=chat_guid, chars=len(request))
+        try:
+            res = await self.tasks.run(request, who, ctx)  # type: ignore[union-attr]
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log_event("task.error", chat_guid=chat_guid, error=exc_name(exc))
+            await self._say_in_voice(chat_guid, "that job broke on my end, try again later", "that one broke on my end, try again later")
+            return
+        log_event(
+            "task.finished", chat_guid=chat_guid, status="ok" if res.ok else res.reason[:40],
+            duration_ms=res.duration_ms, turns=res.turns, cost_cents=round(res.cost_usd * 100), files=len(res.files),
+        )
+        if not res.ok:
+            why = {"timeout": "it took too long", "error_max_turns": "it took too many steps",
+                   "error_max_budget_usd": "it hit the spending cap"}.get(res.reason, "something went wrong")
+            text = f"couldn't finish that one, {why}"
+            if res.text:
+                text += ". here's what i got: " + res.text[:700]
+            await self._say(chat_guid, text, remember=False)
+            return
+        text = res.text if len(res.text) <= 1500 else res.text[:1500].rsplit(" ", 1)[0] + " …"
+        await self._say(chat_guid, text, remember=False)
+        self.context.add(chat_guid, self.s.bot_name, f"[finished a task for {who}: {text[:600]}]", from_bot=True)
+        for f in res.files[:3]:
+            try:
+                await self.bb.send_attachment(chat_guid, f, name=f.name)
+            except Exception as exc:  # noqa: BLE001
+                log_event("task.attach_failed", chat_guid=chat_guid, error=exc_name(exc))
+
+    async def stop_task(self) -> None:
+        """On shutdown: cancel a running task and say so."""
+        job, chat = self._task_job, self._task_chat
+        if job is None or job.done():
+            return
+        job.cancel()
+        try:
+            await job
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
+        log_event("task.abandoned", chat_guid=chat or "?")
+        try:
+            await self._say(chat, "got restarted mid-task, send that /task again", remember=False)  # type: ignore[arg-type]
+        except Exception as exc:  # noqa: BLE001
+            log_event("task.notify_failed", error=exc_name(exc))
 
     async def fire_reminder(self, r: Reminder) -> None:
         await self._say(r.chat_guid, f"⏰ {r.who}: {r.text}")

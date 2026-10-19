@@ -34,6 +34,7 @@ By default **no message content leaves the machine**. See [Privacy model](#priva
 | An inline reply to one of the bot's messages | Treated as talking to the bot, no name needed |
 | Any other message | Sometimes gets a short text reaction (`REACTION_CHANCE`, off by default) |
 | `/remind in 20m <what>`, `/remind at 7pm <what>`, `/remind tomorrow 9am <what>`, `/reminders`, `/remind cancel <n>` | With `REMINDERS_FILE`: posts the reminder in that chat at the time, naming who asked |
+| `/task <job>` | With `TASK_ENABLED`, from `TASK_CHAT_GUIDS` only: Claude researches it with web tools and a sandbox folder, then texts back (and attaches any doc it wrote) |
 | `/forget` | Wipes that chat's context immediately |
 | `/help` | Lists commands |
 | A photo | With `VISION_MODEL`: captioned locally and remembered as `[photo: ...]` so the bot can talk about it |
@@ -208,6 +209,7 @@ With `DASHBOARD_ENABLED=true`, open <http://127.0.0.1:8765/dashboard> (your `POR
 | Message text of all chats the bot account is in | Messages.app `chat.db` and BlueBubbles' own SQLite under `~/Library/Application Support/bluebubbles-server` | Apple/BlueBubbles retention; not controlled by this bot | Only via Apple's iMessage delivery (end-to-end encrypted); Messages in iCloud should be off for the bot account |
 | Notes about people and the group (`MEMORY_DIR`, off by default) | Markdown files, one per chat, 0600 | Until you delete or edit them | No |
 | Photos people send (`VISION_MODEL`) | RAM, plus a 0600 temp file for one local `sips` conversion; the caption joins the rolling context | Deleted right after captioning | No |
+| `/task` requests (`TASK_ENABLED`) | Sent with recent context to api.anthropic.com; notes the agent writes stay in `TASK_DIR` (0700) for 14 days; agent session transcripts deleted after each task | 14 days | Yes, request and context |
 | Image prompts with `IMAGE_BACKEND=openai` | Sent to api.openai.com for that one request | OpenAI's retention | Yes, the prompt only |
 | Pending reminders (`REMINDERS_FILE`, off by default) | One JSON file, 0600 | Until they fire or are cancelled | No |
 | Image prompts | RAM; a `0600` temp file in a `0700` temp dir for the duration of one mflux run | Deleted when the job finishes | No, ever |

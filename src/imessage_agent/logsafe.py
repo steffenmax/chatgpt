@@ -44,6 +44,9 @@ SAFE_KEYS = frozenset(
         "code",
         "attempt",
         "chars",  # length only
+        "cost_cents",
+        "turns",
+        "files",
     }
 )
 

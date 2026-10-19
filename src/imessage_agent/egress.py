@@ -39,6 +39,16 @@ def egress_report(settings: Settings) -> list[str]:
         ]
     else:
         lines.append("  Cloud text mode is OFF. No message content leaves this machine.")
+    if settings.task_enabled:
+        lines += [
+            "",
+            "=" * 72,
+            "  WARNING: TASK_ENABLED=true",
+            f"  /task (from {len(settings.task_chat_guids)} chat(s) only) sends the request and up to",
+            f"  {settings.task_context_messages} recent messages to api.anthropic.com, and the agent fetches web pages",
+            "  from this Mac. It has no shell and can only write inside its task folder.",
+            "=" * 72,
+        ]
     if settings.image_enabled and settings.image_backend == "openai":
         lines += [
             "",

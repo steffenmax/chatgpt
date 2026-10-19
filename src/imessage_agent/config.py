@@ -108,6 +108,16 @@ class Settings(BaseSettings):
     # search. Everything else stays local. Off by default.
     cloud_facts_enabled: bool = False
     cloud_facts_max_searches: int = Field(default=3, ge=0, le=10)
+    # /task: multi-step research jobs run by Claude (Agent SDK) with web search, web fetch
+    # and a sandbox folder. Only from the chats listed in TASK_CHAT_GUIDS. Off by default.
+    task_enabled: bool = False
+    task_chat_guids: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    task_dir: str = ""
+    task_model: str = ""  # empty = ANTHROPIC_MODEL
+    task_max_turns: int = Field(default=25, ge=1, le=200)
+    task_max_budget_usd: float = Field(default=1.0, gt=0, le=20)
+    task_timeout_seconds: float = Field(default=600.0, gt=0)
+    task_context_messages: int = Field(default=15, ge=0, le=100)
     anthropic_api_key: str = ""
     anthropic_model: str = "claude-opus-5-5"
     anthropic_max_tokens: int = Field(default=400, ge=1)
@@ -121,7 +131,7 @@ class Settings(BaseSettings):
     # --- logging ---
     log_level: str = "INFO"
 
-    @field_validator("allowed_chat_guids", mode="before")
+    @field_validator("allowed_chat_guids", "task_chat_guids", mode="before")
     @classmethod
     def _split_guids(cls, v):
         if isinstance(v, str):
@@ -172,6 +182,9 @@ class Settings(BaseSettings):
             hosts.append(("Anthropic API (fact lookups)", "api.anthropic.com:443"))
         if self.image_enabled and self.image_backend == "openai":
             hosts.append(("OpenAI API (image generation)", "api.openai.com:443"))
+        if self.task_enabled:
+            hosts.append(("Anthropic API (/task agent)", "api.anthropic.com:443"))
+            hosts.append(("Web pages fetched during /task", "any website:443"))
         return hosts
 
     @property
@@ -191,6 +204,10 @@ class Settings(BaseSettings):
             problems.append("CLOUD_LLM_ENABLED=true but ANTHROPIC_API_KEY is empty.")
         if self.cloud_facts_enabled and not self.anthropic_api_key:
             problems.append("CLOUD_FACTS_ENABLED=true but ANTHROPIC_API_KEY is empty.")
+        if self.task_enabled and not self.anthropic_api_key:
+            problems.append("TASK_ENABLED=true but ANTHROPIC_API_KEY is empty.")
+        if self.task_enabled and not self.task_chat_guids:
+            problems.append("TASK_ENABLED=true but TASK_CHAT_GUIDS is empty; nobody can use /task.")
         if self.image_enabled and self.image_backend == "openai" and not self.openai_api_key:
             problems.append("IMAGE_BACKEND=openai but OPENAI_API_KEY is empty.")
         if not self.allowed_chat_guids:
