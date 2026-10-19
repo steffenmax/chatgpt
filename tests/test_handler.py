@@ -455,3 +455,48 @@ async def test_dispatcher_image_choice_is_vetoed_without_an_explicit_ask(clock):
         await q.stop()
     assert gen.prompts == [] and bb.texts == [(ALLOWED, "lol yeah")]
 
+
+async def test_voice_ack_rejects_garbled_or_refusing_phrasings(clock, tmp_path):
+    from imessage_agent.context import ContextStore
+    from imessage_agent.reminders import ReminderStore
+    from tests.conftest import FakeBB, FakeLLM, make_settings
+
+    s = make_settings(voice_acks=True)
+
+    async def run(model_says):
+        bb = FakeBB()
+        llm = FakeLLM(model_says)
+        store = ReminderStore(str(tmp_path / f"r{abs(hash(model_says))}.json"))
+        agent = Agent(s, bb, llm, ContextStore(5, 3600, clock=clock), images=None,
+                      resolver=SenderResolver(None, {"+15550001111": "Max"}, use_contacts=False), reminders=store)  # type: ignore[arg-type]
+        await agent.process(message("/remind in 45m call mom", guid="va" + str(abs(hash(model_says)))))
+        return bb.texts[-1][1]
+
+    plain = "got it Max, i'll remind you in 45 min (#1)"
+    # what llama actually said in testing: drops the facts and refuses
+    assert await run("can't, you gotta text max yourself, tell him to meet us at the bar at 7") == plain
+    # keeps facts but adds a refusal
+    assert await run("i can't set reminders but 45 min, #1") == plain
+    # drops the reminder number
+    assert await run("bet max, 45 min and i'll yell at you") == plain
+    # a good in-voice line is used
+    assert await run("bet max, 45 min from now i'm on you, that's #1") == "bet max, 45 min from now i'm on you, that's #1"
+
+
+async def test_voice_ack_rejects_role_confused_echoes(clock, tmp_path):
+    from imessage_agent.context import ContextStore
+    from imessage_agent.reminders import ReminderStore
+    from tests.conftest import FakeBB, FakeLLM, make_settings
+
+    s = make_settings(voice_acks=True)
+    plain = "got it Max, i'll remind you in 45 min (#1)"
+    for i, said in enumerate(["max: hey coco, confirm that reminder #1 is saved in 45 min",
+                              "coco here, 45 min, #1",
+                              "the plain version is: got it max, 45 min, #1"]):
+        bb = FakeBB()
+        store = ReminderStore(str(tmp_path / f"e{i}.json"))
+        agent = Agent(s, bb, FakeLLM(said), ContextStore(5, 3600, clock=clock), images=None,
+                      resolver=SenderResolver(None, {"+15550001111": "Max"}, use_contacts=False), reminders=store)  # type: ignore[arg-type]
+        await agent.process(message("/remind in 45m call mom", guid=f"ec{i}"))
+        assert bb.texts[-1][1] == plain, said
+

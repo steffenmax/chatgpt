@@ -38,6 +38,8 @@ from .reminders import MAX_DAYS_AHEAD, Reminder, ReminderStore, describe, parse
 from .triggers import Trigger, detect, help_text
 
 NEW_MESSAGE = "new-message"
+_ECHOED_INSTRUCTION = re.compile(r"^\s*\w+\s*:|plain version|confirm that|let(ting)? the chat know|\bthey should\b")
+_REFUSAL = re.compile(r"\b(can'?t|cannot|can not|won'?t|unable|not able|yourself)\b")
 
 
 class SenderResolver:
@@ -217,7 +219,7 @@ class Agent:
             elif trigger.kind == "forget":
                 self.context.forget(chat_guid)
                 log_event("context.forgot", chat_guid=chat_guid)
-                await self._say_in_voice(chat_guid, "you just wiped everything you remembered from this chat", "done, wiped everything i had from this chat")
+                await self._say_in_voice(chat_guid, "done, i wiped everything i had from this chat", "done, wiped everything i had from this chat")
             elif trigger.kind == "image":
                 await self._handle_image(chat_guid, trigger.arg)
             elif trigger.kind == "mention":
@@ -249,7 +251,7 @@ class Agent:
         if intent.action == "forget":
             log_event("intent", chat_guid=chat_guid, kind="forget")
             self.context.forget(chat_guid)
-            await self._say_in_voice(chat_guid, "you just wiped everything you remembered from this chat", "done, wiped everything i had from this chat")
+            await self._say_in_voice(chat_guid, "done, i wiped everything i had from this chat", "done, wiped everything i had from this chat")
             return
         await self._reply(chat_guid, history, use_cloud=(intent.action == "lookup"), reason="command" if force_cloud else "intent")
 
@@ -307,8 +309,14 @@ class Agent:
             return Intent()
         return intent
 
-    async def _say_in_voice(self, chat_guid: str, fact: str, fallback: str, remember: bool = False) -> None:
-        """Deliver a fixed fact in the bot's own voice; fall back to the plain text if the model flakes."""
+    async def _say_in_voice(
+        self, chat_guid: str, fact: str, fallback: str, remember: bool = False, keep: tuple[str, ...] = ()
+    ) -> None:
+        """Deliver a fixed fact in the bot's own voice; fall back to the plain text if the model flakes.
+
+        The model's phrasing is used only if it still contains every string in `keep`
+        (times, numbers) and doesn't turn a done deal into a refusal.
+        """
         text = fallback
         if not self.s.voice_acks:
             await self._say(chat_guid, text, remember=remember)
@@ -317,8 +325,19 @@ class Agent:
             async with self._llm_gate:
                 raw = await self.llm.reply(self._system_for(chat_guid) + VOICE_SYSTEM_SUFFIX + fact, [{"role": "user", "content": "(say it now)"}])
             cand = clean_reply(raw, self.s.bot_name)
-            if cand and len(cand) <= max(240, len(fallback) * 3) and "\n" not in cand:
+            low = cand.lower()
+            if (
+                cand
+                and len(cand) <= max(240, len(fallback) * 3)
+                and "\n" not in cand
+                and all(k.lower() in low for k in keep)
+                and not (_REFUSAL.search(low) and not _REFUSAL.search(fact.lower()))
+                and not _ECHOED_INSTRUCTION.search(low)
+                and self.s.bot_name.lower() not in low
+            ):
                 text = cand
+            else:
+                log_event("voice.rejected", chat_guid=chat_guid)
         except Exception as exc:  # noqa: BLE001
             log_event("voice.failed", chat_guid=chat_guid, error=exc_name(exc))
         await self._say(chat_guid, text, remember=remember)
@@ -345,7 +364,14 @@ class Agent:
             await self._say(chat_guid, "this chat has too many reminders pending, cancel some first", remember=False)
             return
         plain = f"got it {who}, i'll remind you {describe(due, now)} (#{r.id})"
-        await self._say_in_voice(chat_guid, f"you will remind {who} {describe(due, now)}, reminder number {r.id}", plain)
+        when = describe(due, now)
+        hour = re.search(r"\d+", when)
+        await self._say_in_voice(
+            chat_guid,
+            f"got it {who}, i'll remind you here {when}, that's #{r.id}",
+            plain,
+            keep=(hour.group(0) if hour else "", f"{r.id}"),
+        )
 
     async def _handle_reminders(self, chat_guid: str) -> None:
         if self.reminders is None:
@@ -454,7 +480,13 @@ class Agent:
         job = ImageJob(chat_guid=chat_guid, prompt=prompt, job_id=uuid.uuid4().hex[:8])
         ahead = self.images.qsize()
         note = "on it, give me a minute" if ahead == 0 else f"on it, {ahead} ahead of you in the queue"
-        await self._say_in_voice(chat_guid, 'you are on it and the picture will take a few minutes' + (' and there are ' + str(ahead) + ' ahead in the queue' if ahead else ''), note)
+        await self._say_in_voice(
+            chat_guid,
+            "on it, the picture will take me a few minutes"
+            + (f", {ahead} ahead of yours" if ahead else ""),
+            note,
+            keep=(str(ahead),) if ahead else (),
+        )
         await self.images.submit(job)
 
     async def send_image(self, job: ImageJob, png: Path) -> None:
@@ -491,11 +523,11 @@ class Agent:
 
     async def image_failed(self, job: ImageJob, reason: str) -> None:
         if reason == "shutdown":
-            fact, text = "you got restarted mid-picture and they should ask for the image again", "got restarted mid-picture, send that /image again"
+            fact, text = "i got restarted mid-picture, ask me for it again", "got restarted mid-picture, send that /image again"
         elif reason == "rejected":
-            fact, text = "you are not drawing that one and they should try a different prompt", "not drawing that one, try a different prompt"
+            fact, text = "not drawing that one, try a different idea", "not drawing that one, try a different prompt"
         else:
-            fact, text = "the picture failed and they should try again in a bit", "that image didn't come out, sorry. try again in a bit?"
+            fact, text = "that picture didn't come out, try me again in a bit", "that image didn't come out, sorry. try again in a bit?"
         await self._say_in_voice(job.chat_guid, fact, text)
 
     async def _say(self, chat_guid: str, text: str, remember: bool = True) -> None:

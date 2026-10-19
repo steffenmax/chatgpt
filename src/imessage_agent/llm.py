@@ -181,9 +181,9 @@ def parse_intent(raw: str) -> Intent:
 
 
 VOICE_SYSTEM_SUFFIX = (
-    "\n\nRight now you only need to tell the chat the following, in your own voice, as ONE short "
-    "message. Keep every fact (times, numbers, ids, names) exactly as given; add nothing that "
-    "isn't in it; no markdown, no quotes.\nSay: "
+    "\n\nRight now you are just letting the chat know something, as ONE short text in your own "
+    "voice, speaking as yourself. Keep every time, number and name exactly; add nothing new; no "
+    "markdown, no quotes, no name prefix. The plain version is: "
 )
 
 
