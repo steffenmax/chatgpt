@@ -50,6 +50,11 @@ class Settings(BaseSettings):
     # Phrase command acknowledgements ("on it", "got it, 7pm") in the bot's own voice via
     # the local model (one short extra call). False = fixed wording.
     voice_acks: bool = True
+    # Local vision model (Ollama) used to caption photos people send, so the bot can see
+    # them. Loaded only when a photo arrives, unloaded after VISION_KEEP_ALIVE. Empty = off.
+    vision_model: str = ""
+    vision_max_width: int = Field(default=1024, ge=256, le=4096)
+    vision_keep_alive: str = "2m"
     memory_update_every: int = Field(default=15, ge=1)
     memory_max_chars: int = Field(default=3000, ge=200)
 

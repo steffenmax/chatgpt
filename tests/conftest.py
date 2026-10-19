@@ -35,6 +35,12 @@ class FakeBB:
     async def query_contacts(self, addresses):
         return []
 
+    async def download_attachment(self, guid, max_bytes=0):
+        self.downloads = getattr(self, "downloads", []) + [guid]
+        if guid == "missing":
+            raise RuntimeError("404")
+        return b"\xff\xd8fakejpeg"
+
     async def aclose(self):
         pass
 

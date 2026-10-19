@@ -112,6 +112,16 @@ async def cmd_check(s: Settings, args) -> int:
         finally:
             await ol.aclose()
 
+    if s.vision_model:
+        from .vision import OllamaVision
+
+        v = OllamaVision(s.ollama_url, s.vision_model)
+        try:
+            present = await v.has_model()
+        finally:
+            await v.aclose()
+        print(f"vision: model {s.vision_model} {'present' if present else 'NOT pulled (ollama pull ' + s.vision_model + ')'}")
+        ok = ok and bool(present)
     if s.image_enabled:
         if s.image_backend == "openai":
             from .imagegen import OpenAIImageGenerator

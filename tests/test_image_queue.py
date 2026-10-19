@@ -54,8 +54,10 @@ async def test_image_flow_queue_and_cleanup():
     # temp dirs (image + prompt file) are gone after sending
     for d in gen.dirs:
         assert not d.exists()
-    # prompt never enters chat context
-    assert all("corgi" not in m.text for m in ctx.get(ALLOWED))
+    # the bot remembers what it posted, as its own line; the human request itself is not stored
+    sent = [m for m in ctx.get(ALLOWED) if m.from_bot and m.text.startswith("[sent a picture:")]
+    assert [m.text for m in sent] == ["[sent a picture: a corgi surfing]", "[sent a picture: a cat]"]
+    assert all("corgi" not in m.text for m in ctx.get(ALLOWED) if not m.from_bot)
 
 
 async def test_image_without_prompt():

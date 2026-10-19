@@ -96,6 +96,7 @@ class Agent:
         cloud: TextBackend | None = None,
         memory: MemoryStore | None = None,
         reminders: ReminderStore | None = None,
+        vision=None,
     ):
         self.s = settings
         self.bb = bb
@@ -105,6 +106,8 @@ class Agent:
         # Optional on-disk notes about each chat, maintained by the local model.
         self.memory = memory
         self.reminders = reminders
+        # Optional local vision model: photos people send become short captions in context.
+        self.vision = vision
         # GUIDs of the bot's own messages (from isFromMe webhooks) so an inline reply
         # to one of them counts as talking to the bot.
         self._bot_guids: OrderedDict[str, None] = OrderedDict()
@@ -153,6 +156,12 @@ class Agent:
             return "ignored:no_chat"
 
         text = data.get("text") if isinstance(data.get("text"), str) else ""
+        if self.vision is not None and chat_guid in self._allowed:
+            photos = [a for a in (data.get("attachments") or [])
+                      if isinstance(a, dict) and str(a.get("mimeType") or "").startswith("image/") and a.get("guid")]
+            if photos:
+                captions = await self._caption_photos(chat_guid, photos[:2])
+                text = (text + " " + captions).strip() if captions else text
         # BlueBubbles delivers the same message more than once, and the first copy can
         # arrive before the text is populated. Only count a delivery as "seen" once it
         # carried text, so a later copy with the text still gets handled.
@@ -447,6 +456,34 @@ class Agent:
     async def send_image(self, job: ImageJob, png: Path) -> None:
         await self.bb.send_attachment(job.chat_guid, png, name=f"{self.s.bot_name.lower()}-{job.job_id}.png")
         log_event("image.sent", chat_guid=job.chat_guid, job_id=job.job_id)
+        # So the bot knows what it just posted when the chat reacts to it.
+        self.context.add(job.chat_guid, self.s.bot_name, f"[sent a picture: {job.prompt}]", from_bot=True)
+
+    async def _caption_photos(self, chat_guid: str, photos: list[dict]) -> str:
+        parts = []
+        for a in photos:
+            data = None
+            for attempt in range(3):  # the attachment may still be transferring when the webhook fires
+                try:
+                    data = await self.bb.download_attachment(str(a["guid"]))
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    if attempt == 2:
+                        log_event("photo.download_failed", chat_guid=chat_guid, error=exc_name(exc), attempt=attempt + 1)
+                    else:
+                        await asyncio.sleep(2)
+            if data is None:
+                continue
+            try:
+                async with self._llm_gate:
+                    cap = await self.vision.caption(data)
+            except Exception as exc:  # noqa: BLE001
+                log_event("photo.caption_failed", chat_guid=chat_guid, error=exc_name(exc))
+                continue
+            if cap:
+                parts.append(f"[photo: {cap}]")
+                log_event("photo.captioned", chat_guid=chat_guid, chars=len(cap))
+        return " ".join(parts)
 
     async def image_failed(self, job: ImageJob, reason: str) -> None:
         if reason == "shutdown":

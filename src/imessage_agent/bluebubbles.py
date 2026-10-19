@@ -59,6 +59,16 @@ class BlueBubblesClient:
             raise BlueBubblesError(f"BlueBubbles API error (HTTP {resp.status_code})")
         return body.get("data") if isinstance(body, dict) else body
 
+    # -- attachments --
+    async def download_attachment(self, guid: str, max_bytes: int = 25 * 1024 * 1024) -> bytes:
+        """Raw bytes of an attachment (held in RAM only by the caller)."""
+        r = await self._client.get(f"/api/v1/attachment/{guid}/download", params=self._params())
+        if r.status_code != 200:
+            raise BlueBubblesError(f"attachment download failed (HTTP {r.status_code})")
+        if len(r.content) > max_bytes:
+            raise BlueBubblesError("attachment too large")
+        return r.content
+
     # -- server --
     async def ping(self) -> bool:
         r = await self._client.get("/api/v1/ping", params=self._params())
