@@ -155,6 +155,13 @@ class ImageQueue:
             self._task = asyncio.create_task(self._worker(), name="image-worker")
 
     async def stop(self) -> None:
+        # Whatever was generating or still waiting is lost with this process: say so,
+        # instead of leaving the chat waiting for a picture that never comes. Capture
+        # the running job before cancelling, since the worker clears it on cancel.
+        lost: list[ImageJob] = []
+        if self._current is not None:
+            lost.append(self._current)
+            self._current = None
         if self._task:
             self._task.cancel()
             try:
@@ -162,12 +169,6 @@ class ImageQueue:
             except asyncio.CancelledError:
                 pass
             self._task = None
-        # Whatever was generating or still waiting is lost with this process: say so,
-        # instead of leaving the chat waiting for a picture that never comes.
-        lost: list[ImageJob] = []
-        if self._current is not None:
-            lost.append(self._current)
-            self._current = None
         while not self._queue.empty():
             try:
                 lost.append(self._queue.get_nowait())
