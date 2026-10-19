@@ -146,6 +146,11 @@ def create_app(settings: Settings | None = None, agent: Agent | None = None) -> 
         request.app.state.agent.schedule(payload)
         return JSONResponse({"ok": True})
 
+    if settings.dashboard_enabled:
+        from .dashboard import build_router
+
+        app.include_router(build_router(settings))
+
     @app.get("/health")
     async def health():
         ag: Agent = app.state.agent

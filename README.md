@@ -181,6 +181,10 @@ tail -f ~/Library/Logs/imessage-agent/agent.log
 
 The LaunchAgent starts at login, restarts on crash (`KeepAlive`), and logs to `~/Library/Logs/imessage-agent/`. `scripts/install-launchd.sh uninstall` removes it. The Mac must be logged into the bot's user session for Messages.app to run; disable sleep in System Settings → Energy (or Displays → Advanced on laptops) and consider auto-login for that user.
 
+## Dashboard
+
+With `DASHBOARD_ENABLED=true`, open <http://127.0.0.1:8765/dashboard> (your `PORT`) on the bot Mac: BlueBubbles/Ollama status and which models are loaded, every outbound host marked local or REMOTE, the allowlisted chats and their members, the memory notes per chat (editable in place), pending reminders with cancel, and a live feed of the event log. It is served by the bot process on the loopback port, so nothing is exposed beyond this Mac.
+
 ## CLI
 
 | Command | Purpose |

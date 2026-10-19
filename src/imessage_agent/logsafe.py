@@ -86,8 +86,33 @@ class SecretRedactingFilter(logging.Filter):
         return True
 
 
+class _RingHandler(logging.Handler):
+    """Keeps the last N formatted (already redacted) lines in memory for the dashboard."""
+
+    def __init__(self, capacity: int = 400):
+        super().__init__()
+        from collections import deque
+
+        self.lines = deque(maxlen=capacity)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self.lines.append(self.format(record))
+        except Exception:  # noqa: BLE001
+            pass
+
+
+_ring: _RingHandler | None = None
+
+
+def recent_lines(n: int = 200) -> list[str]:
+    if _ring is None:
+        return []
+    return list(_ring.lines)[-n:]
+
+
 def install_logging(level: str = "INFO", secrets: list[str] | None = None) -> None:
-    global _handler
+    global _handler, _ring
     root = logging.getLogger()
     root.setLevel(level.upper())
     if _handler is not None:
@@ -98,6 +123,12 @@ def install_logging(level: str = "INFO", secrets: list[str] | None = None) -> No
     redactor = SecretRedactingFilter(secrets or [])
     handler.addFilter(redactor)
     root.addHandler(handler)
+    if _ring is not None:
+        root.removeHandler(_ring)
+    _ring = _RingHandler()
+    _ring.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+    _ring.addFilter(redactor)
+    root.addHandler(_ring)
     # Make sure third-party loggers (uvicorn, httpx) also go through redaction.
     for name in ("uvicorn", "uvicorn.error", "uvicorn.access", "httpx", "httpcore", "httpx2", "httpcore2"):
         lg = logging.getLogger(name)

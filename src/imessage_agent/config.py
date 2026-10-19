@@ -113,6 +113,11 @@ class Settings(BaseSettings):
     anthropic_max_tokens: int = Field(default=400, ge=1)
     anthropic_timeout_seconds: float = Field(default=60.0, gt=0)
 
+    # --- dashboard (loopback only, same port as the webhook) ---
+    # http://127.0.0.1:PORT/dashboard : health, what the bot can see and connect to,
+    # memory notes (editable), reminders, live events. Off by default.
+    dashboard_enabled: bool = False
+
     # --- logging ---
     log_level: str = "INFO"
 
