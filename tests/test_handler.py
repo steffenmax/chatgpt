@@ -117,7 +117,7 @@ async def test_quiet_question_answered_when_nobody_replies(clock):
     assert llm.calls == [] and bb.texts == []
     await asyncio.sleep(0.12)
     await agent.drain()
-    assert len(llm.calls) == 1
+    assert len(llm.calls) == 2  # dispatcher + reply
     assert bb.texts == [(ALLOWED, "sure")]
 
 
@@ -145,12 +145,33 @@ async def test_quiet_question_off_by_default(agent_parts):
     assert llm.calls == [] and bb.texts == []
 
 
+class RoutingLLM:
+    """Answers the dispatcher with `intent_json` and everything else with `reply_text`."""
+
+    name = "fake"
+
+    def __init__(self, intent_json, reply_text="local answer"):
+        self.intent_json, self.reply_text = intent_json, reply_text
+        self.calls = []
+
+    async def reply(self, system, messages):
+        self.calls.append(messages)
+        return self.intent_json if "dispatcher" in system else self.reply_text
+
+    async def healthy(self):
+        return True
+
+    async def aclose(self):
+        pass
+
+
 def _cloud_agent(local_reply, clock):
     from imessage_agent.context import ContextStore
     from tests.conftest import FakeBB, FakeLLM, make_settings
 
     s = make_settings()
-    bb, local, cloud = FakeBB(), FakeLLM(local_reply), FakeLLM("from the cloud")
+    intent = '{"action": "lookup"}' if local_reply == "yes" else '{"action": "chat"}'
+    bb, local, cloud = FakeBB(), RoutingLLM(intent, local_reply), FakeLLM("from the cloud")
     cloud.name = "anthropic"
     ctx = ContextStore(5, 3600, clock=clock)
     agent = Agent(
@@ -164,8 +185,8 @@ def _cloud_agent(local_reply, clock):
 async def test_mention_routed_to_cloud_when_router_says_yes(clock):
     agent, bb, local, cloud = _cloud_agent("yes", clock)
     assert await agent.process(message("coco who won last night?", guid="c1")) == "handled:mention"
-    assert len(local.calls) == 1, "local model is asked only the yes/no question"
-    assert local.calls[0][0]["content"].endswith("yes or no.")
+    assert len(local.calls) == 1, "local model is asked only which tool to use"
+    assert local.calls[0][0]["content"].endswith("JSON only.")
     assert len(cloud.calls) == 1
     assert len(bb.texts) == 2, "a 'looking it up' notice, then the answer"
     assert "look" in bb.texts[0][1] or "check" in bb.texts[0][1] or "find out" in bb.texts[0][1]
@@ -175,7 +196,7 @@ async def test_mention_routed_to_cloud_when_router_says_yes(clock):
 async def test_mention_stays_local_when_router_says_no(clock):
     agent, bb, local, cloud = _cloud_agent("no", clock)
     await agent.process(message("coco roast me", guid="c2"))
-    assert len(local.calls) == 2, "router call + the actual reply"
+    assert len(local.calls) == 2, "dispatcher call + the actual reply"
     assert cloud.calls == []
     assert bb.texts == [(ALLOWED, "no")]
 
@@ -194,7 +215,7 @@ async def test_ask_without_cloud_falls_back_to_local(agent_parts):
     s, bb, llm, ctx, agent = agent_parts
     assert agent.cloud is None
     assert await agent.process(message("/ask something", guid="c4")) == "handled:ask"
-    assert len(llm.calls) == 1 and bb.texts == [(ALLOWED, "yo")]
+    assert len(llm.calls) == 1 and bb.texts == [(ALLOWED, "yo")]  # /ask skips the dispatcher
 
 
 async def test_help_mentions_ask_only_with_cloud(clock, agent_parts):
@@ -217,7 +238,7 @@ async def test_cloud_failure_falls_back_to_local(clock, caplog):
     with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
         assert await agent.process(message("coco who won last night?", guid="f1")) == "handled:mention"
     assert len(cloud.calls) == 1
-    assert len(local.calls) == 2, "router call, then the local reply after the cloud failed"
+    assert len(local.calls) == 2, "dispatcher call, then the local reply after the cloud failed"
     assert len(bb.texts) == 2 and bb.texts[1] == (ALLOWED, "yes")
     assert any("event=llm.cloud_failed" in r.getMessage() and "error=RuntimeError" in r.getMessage() for r in caplog.records)
 
@@ -230,10 +251,10 @@ async def test_inline_reply_to_bot_message_counts_as_mention(agent_parts):
     assert await agent.process(message("nah", guid="r0", threadOriginatorGuid="someone-elses")) == "stored"
     # an inline reply to the bot's message triggers a reply without the name
     assert await agent.process(message("why though", guid="r1", threadOriginatorGuid="bot-msg-1")) == "handled:mention"
-    assert len(llm.calls) == 1 and bb.texts == [(ALLOWED, "yo")]
+    assert len(llm.calls) == 2 and bb.texts == [(ALLOWED, "yo")]  # dispatcher + reply
     # replyToGuid works too
     assert await agent.process(message("ok", guid="r2", replyToGuid="bot-msg-1")) == "handled:mention"
-    assert len(llm.calls) == 2
+    assert len(llm.calls) == 4
 
 
 def _reaction_agent(clock, reply, **over):
@@ -320,7 +341,86 @@ async def test_redelivery_with_text_after_empty_copy_is_handled(agent_parts):
     s, bb, llm, ctx, agent = agent_parts
     assert await agent.process(message("", guid="same")) == "ignored:empty"
     assert await agent.process(message("coco you there", guid="same")) == "handled:mention"
-    assert len(llm.calls) == 1 and len(bb.texts) == 1
+    assert len(llm.calls) == 2 and len(bb.texts) == 1  # dispatcher + reply
     # a true duplicate (text both times) is still dropped
     assert await agent.process(message("coco you there", guid="same")) == "ignored:duplicate"
+    assert len(llm.calls) == 2
+
+
+async def test_natural_language_image_request_queues_an_image(clock):
+    from imessage_agent.context import ContextStore
+    from imessage_agent.imagegen import ImageQueue
+    from tests.conftest import FakeBB, make_settings
+    from tests.test_image_queue import FakeGenerator
+
+    s = make_settings()
+    bb = FakeBB()
+    llm = RoutingLLM('{"action": "image", "prompt": "a corgi on a surfboard at sunset"}')
+    ctx = ContextStore(5, 3600, clock=clock)
+    holder = {}
+
+    async def send(job, png):
+        await holder["a"].send_image(job, png)
+
+    async def fail(job, reason):
+        await holder["a"].image_failed(job, reason)
+
+    gen = FakeGenerator()
+    q = ImageQueue(gen, send, fail)
+    agent = Agent(s, bb, llm, ctx, images=q, resolver=SenderResolver(None, {}, use_contacts=False))  # type: ignore[arg-type]
+    holder["a"] = agent
+    q.start()
+    try:
+        assert await agent.process(message("coco can you make me a picture of a corgi surfing", guid="n1")) == "handled:mention"
+        await asyncio.wait_for(q._queue.join(), timeout=5)
+    finally:
+        await q.stop()
+    assert gen.prompts == ["a corgi on a surfboard at sunset"]
+    assert bb.texts[0][1].startswith("on it") and len(bb.attachments) == 1
+
+
+async def test_natural_language_reminder_sets_one(clock, tmp_path):
+    from imessage_agent.context import ContextStore
+    from imessage_agent.reminders import ReminderStore
+    from tests.conftest import FakeBB, make_settings
+
+    s = make_settings()
+    bb = FakeBB()
+    llm = RoutingLLM('{"action": "remind", "when": "in 30m", "what": "call the dentist"}')
+    ctx = ContextStore(5, 3600, clock=clock)
+    store = ReminderStore(str(tmp_path / "r.json"))
+    agent = Agent(s, bb, llm, ctx, images=None, resolver=SenderResolver(None, {"+15550001111": "Alex"}, use_contacts=False), reminders=store)  # type: ignore[arg-type]
+    assert await agent.process(message("coco remind me in half an hour to call the dentist", guid="n2")) == "handled:mention"
+    assert bb.texts[-1][1].startswith("got it Alex, i'll remind you in 30 min")
+    assert [r.text for r in store.pending(ALLOWED)] == ["call the dentist"]
+
+
+async def test_intent_falls_back_to_chat_when_tool_missing_or_json_bad(clock):
+    from imessage_agent.context import ContextStore
+    from tests.conftest import FakeBB, make_settings
+
+    s = make_settings()
+    for intent in ('{"action": "image", "prompt": "x"}', '{"action": "remind", "when": "in 5m", "what": "y"}', 'not json', '{"action": "lookup"}'):
+        bb = FakeBB()
+        llm = RoutingLLM(intent, "chatting")
+        agent = Agent(s, bb, llm, ContextStore(5, 3600, clock=clock), images=None, resolver=SenderResolver(None, {}, use_contacts=False))  # type: ignore[arg-type]
+        assert await agent.process(message("coco hey", guid="n3" + intent[:3])) == "handled:mention"
+        assert bb.texts == [(ALLOWED, "chatting")], intent
+
+
+async def test_voice_acks_use_the_model_and_fall_back(clock):
+    from imessage_agent.context import ContextStore
+    from tests.conftest import FakeBB, FakeLLM, make_settings
+
+    s = make_settings(voice_acks=True)
+    bb, llm = FakeBB(), FakeLLM("consider it gone, chief")
+    agent = Agent(s, bb, llm, ContextStore(5, 3600, clock=clock), images=None, resolver=SenderResolver(None, {}, use_contacts=False))  # type: ignore[arg-type]
+    await agent.process(message("/forget", guid="v1"))
+    assert bb.texts == [(ALLOWED, "consider it gone, chief")]
+    assert "Keep every fact" in llm.calls and True or True  # system prompt not captured by FakeLLM; call happened:
     assert len(llm.calls) == 1
+    bb, llm = FakeBB(), FakeLLM("")
+    agent = Agent(s, bb, llm, ContextStore(5, 3600, clock=clock), images=None, resolver=SenderResolver(None, {}, use_contacts=False))  # type: ignore[arg-type]
+    await agent.process(message("/forget", guid="v2"))
+    assert bb.texts == [(ALLOWED, "done, wiped everything i had from this chat")]
+

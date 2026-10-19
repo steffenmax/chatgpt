@@ -6,8 +6,10 @@ Optional: Anthropic API, only when CLOUD_LLM_ENABLED=true. Text only, never imag
 
 from __future__ import annotations
 
+import json
 import re
-from typing import Protocol
+from dataclasses import dataclass
+from typing import Any, Protocol
 
 import httpx
 
@@ -48,7 +50,7 @@ REACTION_ADDENDUM = (
     "\n\nRight now you are NOT replying. You are only deciding whether the LAST message deserves a "
     "quick reaction, the way a friend fires off 'lmaooo', '😂😂', 'wait what', '💀' or 'W'. The default "
     "is NONE: plans, logistics, questions, money, 'ok', 'see you', and anything ordinary get NONE. React "
-    "only when the message is genuinely funny, wild, a big win or a big L, or begging to be roasted. "
+    "when the message is funny, wild, a win or an L, a confession, a hot take, or begging to be roasted. "
     "Answer with exactly the word NONE, or the reaction itself: at most 6 words or a few emoji, nothing "
     "else, no quotes, no explanation."
 )
@@ -80,6 +82,78 @@ def parse_reaction(text: str) -> str | None:
     if not t or t.upper().startswith("NONE") or "\n" in t or len(t) > 40:
         return None
     return t
+
+
+# --- tool-aware intent -----------------------------------------------------------
+INTENT_SYSTEM = (
+    "You are the dispatcher for {bot_name}, a friend in a group chat who has a few tools. Read the "
+    "recent chat; the LAST message is addressed to {bot_name}. Decide what {bot_name} should do and "
+    "answer ONLY with JSON matching the schema.\n"
+    "actions:\n"
+    "- \"image\": they want a picture/image/photo/drawing made. Put a clean, vivid image prompt in "
+    "\"prompt\" (what to draw, not the chat wording).\n"
+    "- \"remind\": they want to be reminded of something later. Put the time phrase exactly as said "
+    "in \"when\" (e.g. \"in 20m\", \"at 7pm\", \"tomorrow 9am\", \"sat 3pm\") and the thing in \"what\".\n"
+    "- \"lookup\": answering needs current or outside information (scores, schedules, news, prices, "
+    "weather, hours, who won, precise stats/dates).\n"
+    "- \"forget\": they explicitly ask {bot_name} to forget/wipe what it remembers.\n"
+    "- \"chat\": anything else: banter, opinions, roasts, advice, general knowledge, questions "
+    "{bot_name} can answer from memory. When unsure, choose chat."
+)
+
+INTENT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "action": {"type": "string", "enum": ["chat", "image", "remind", "lookup", "forget"]},
+        "prompt": {"type": "string"},
+        "when": {"type": "string"},
+        "what": {"type": "string"},
+    },
+    "required": ["action"],
+}
+
+
+@dataclass(frozen=True)
+class Intent:
+    action: str = "chat"
+    prompt: str = ""
+    when: str = ""
+    what: str = ""
+
+
+def intent_messages(history: list[ContextMessage]) -> list[dict[str, str]]:
+    lines = [f"{m.sender}: {m.text}" for m in history[-8:]]
+    return [{"role": "user", "content": "\n".join(lines) + "\n\nJSON only."}]
+
+
+def parse_intent(raw: str) -> Intent:
+    text = _THINK_RE.sub("", raw or "").strip()
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        return Intent()
+    try:
+        data = json.loads(text[start : end + 1])
+    except ValueError:
+        return Intent()
+    if not isinstance(data, dict):
+        return Intent()
+    action = str(data.get("action") or "chat").lower().strip()
+    if action not in ("chat", "image", "remind", "lookup", "forget"):
+        action = "chat"
+    g = lambda k: str(data.get(k) or "").strip()[:600]
+    intent = Intent(action, g("prompt"), g("when"), g("what"))
+    if intent.action == "image" and not intent.prompt:
+        return Intent()
+    if intent.action == "remind" and not (intent.when and intent.what):
+        return Intent()
+    return intent
+
+
+VOICE_SYSTEM_SUFFIX = (
+    "\n\nRight now you only need to tell the chat the following, in your own voice, as ONE short "
+    "message. Keep every fact (times, numbers, ids, names) exactly as given; add nothing that "
+    "isn't in it; no markdown, no quotes.\nSay: "
+)
 
 
 def facts_router_messages(history: list[ContextMessage]) -> list[dict[str, str]]:
@@ -158,13 +232,26 @@ class OllamaBackend:
         self._client = httpx.AsyncClient(base_url=self.base_url, timeout=timeout)
 
     async def reply(self, system: str, messages: list[dict[str, str]]) -> str:
+        return await self._chat(system, messages)
+
+    async def structured(self, system: str, messages: list[dict[str, str]], schema: dict[str, Any]) -> str:
+        """Ask for JSON matching `schema` (Ollama constrained decoding), deterministic."""
+        return await self._chat(system, messages, fmt=schema, temperature=0.0, max_tokens=200)
+
+    async def _chat(self, system, messages, fmt=None, temperature=None, max_tokens=None) -> str:
         payload = {
             "model": self.model,
             "messages": [{"role": "system", "content": system}, *messages],
             "stream": False,
             "keep_alive": self.keep_alive,
-            "options": {"temperature": self.temperature, "num_predict": self.max_tokens, "num_ctx": self.num_ctx},
+            "options": {
+                "temperature": self.temperature if temperature is None else temperature,
+                "num_predict": self.max_tokens if max_tokens is None else max_tokens,
+                "num_ctx": self.num_ctx,
+            },
         }
+        if fmt is not None:
+            payload["format"] = fmt
         r = await self._client.post("/api/chat", json=payload)
         r.raise_for_status()
         data = r.json()

@@ -146,7 +146,7 @@ async def test_mention_waits_while_image_generates():
     finally:
         await q.stop()
 
-    assert len(llm.calls) == 1
+    assert len(llm.calls) == 2  # dispatcher + reply, both after the image finished
     assert events == ["unload", "gen.start", "gen.end"]
 
 

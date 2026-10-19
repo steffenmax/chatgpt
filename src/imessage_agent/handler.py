@@ -18,15 +18,18 @@ from .context import ContextStore
 from .imagegen import ImageJob, ImageQueue
 from .llm import (
     CLOUD_FACTS_ADDENDUM,
+    INTENT_SCHEMA,
+    INTENT_SYSTEM,
     LOOKUP_NOTICES,
-    NEEDS_FACTS_SYSTEM,
     REACTION_ADDENDUM,
+    VOICE_SYSTEM_SUFFIX,
+    Intent,
     TextBackend,
     build_messages,
     clean_reply,
-    facts_router_messages,
+    intent_messages,
+    parse_intent,
     parse_reaction,
-    parse_yes_no,
 )
 from .logsafe import exc_name, log_event
 from .memory import MemoryStore
@@ -204,7 +207,7 @@ class Agent:
             elif trigger.kind == "forget":
                 self.context.forget(chat_guid)
                 log_event("context.forgot", chat_guid=chat_guid)
-                await self._say(chat_guid, "done, wiped everything i had from this chat", remember=False)
+                await self._say_in_voice(chat_guid, "you just wiped everything you remembered from this chat", "done, wiped everything i had from this chat")
             elif trigger.kind == "image":
                 await self._handle_image(chat_guid, trigger.arg)
             elif trigger.kind == "mention":
@@ -223,17 +226,33 @@ class Agent:
     # ---------------------------------------------------------------- handlers
     async def _handle_mention(self, chat_guid: str, force_cloud: bool = False) -> None:
         history = self.context.get(chat_guid)
+        who = history[-1].sender if history else "someone"
+        intent = Intent("lookup") if force_cloud else await self._intent(history)
+        if intent.action == "image" and self.images is not None:
+            log_event("intent", chat_guid=chat_guid, kind="image")
+            await self._handle_image(chat_guid, intent.prompt)
+            return
+        if intent.action == "remind" and self.reminders is not None:
+            log_event("intent", chat_guid=chat_guid, kind="remind")
+            await self._handle_remind(chat_guid, who, f"{intent.when} {intent.what}")
+            return
+        if intent.action == "forget":
+            log_event("intent", chat_guid=chat_guid, kind="forget")
+            self.context.forget(chat_guid)
+            await self._say_in_voice(chat_guid, "you just wiped everything you remembered from this chat", "done, wiped everything i had from this chat")
+            return
+        await self._reply(chat_guid, history, use_cloud=(intent.action == "lookup"), reason="command" if force_cloud else "intent")
+
+    async def _reply(self, chat_guid: str, history, use_cloud: bool, reason: str) -> None:
         messages = build_messages(self.s.persona, self.s.bot_name, history)
         backend = self.llm
         system = self._system_for(chat_guid)
-        if self.cloud is not None:
-            reason = "command" if force_cloud else "router"
-            if force_cloud or await self._needs_facts(history):
-                backend = self.cloud
-                system = system + CLOUD_FACTS_ADDENDUM
-                log_event("llm.escalate", chat_guid=chat_guid, reason=reason, backend=backend.name)
-                # Say so first: the lookup takes 10-20 s and silence reads as ignoring them.
-                await self._say(chat_guid, random.choice(LOOKUP_NOTICES), remember=False)
+        if use_cloud and self.cloud is not None:
+            backend = self.cloud
+            system = system + CLOUD_FACTS_ADDENDUM
+            log_event("llm.escalate", chat_guid=chat_guid, reason=reason, backend=backend.name)
+            # Say so first: the lookup takes 10-20 s and silence reads as ignoring them.
+            await self._say(chat_guid, random.choice(LOOKUP_NOTICES), remember=False)
         started = time.monotonic()
         async with self._llm_gate:
             try:
@@ -257,6 +276,40 @@ class Agent:
             reply = "hm, blanked. say that again?"
         await self._say(chat_guid, reply)
 
+    async def _intent(self, history) -> Intent:
+        """Ask the local model which tool (if any) the last message calls for."""
+        if not history:
+            return Intent()
+        system = INTENT_SYSTEM.replace("{bot_name}", self.s.bot_name)
+        msgs = intent_messages(history)
+        try:
+            async with self._llm_gate:
+                structured = getattr(self.llm, "structured", None)
+                raw = await structured(system, msgs, INTENT_SCHEMA) if structured else await self.llm.reply(system, msgs)
+        except Exception as exc:  # noqa: BLE001
+            log_event("router.error", error=exc_name(exc))
+            return Intent()
+        intent = parse_intent(raw)
+        if intent.action == "lookup" and self.cloud is None:
+            return Intent()
+        return intent
+
+    async def _say_in_voice(self, chat_guid: str, fact: str, fallback: str, remember: bool = False) -> None:
+        """Deliver a fixed fact in the bot's own voice; fall back to the plain text if the model flakes."""
+        text = fallback
+        if not self.s.voice_acks:
+            await self._say(chat_guid, text, remember=remember)
+            return
+        try:
+            async with self._llm_gate:
+                raw = await self.llm.reply(self._system_for(chat_guid) + VOICE_SYSTEM_SUFFIX + fact, [{"role": "user", "content": "(say it now)"}])
+            cand = clean_reply(raw, self.s.bot_name)
+            if cand and len(cand) <= max(240, len(fallback) * 3) and "\n" not in cand:
+                text = cand
+        except Exception as exc:  # noqa: BLE001
+            log_event("voice.failed", chat_guid=chat_guid, error=exc_name(exc))
+        await self._say(chat_guid, text, remember=remember)
+
     async def _handle_remind(self, chat_guid: str, who: str, arg: str) -> None:
         if self.reminders is None:
             await self._say(chat_guid, "reminders are off on my end", remember=False)
@@ -278,7 +331,8 @@ class Agent:
         if r is None:
             await self._say(chat_guid, "this chat has too many reminders pending, cancel some first", remember=False)
             return
-        await self._say(chat_guid, f"got it {who}, i'll remind you {describe(due, now)} (#{r.id})", remember=False)
+        plain = f"got it {who}, i'll remind you {describe(due, now)} (#{r.id})"
+        await self._say_in_voice(chat_guid, f"you will remind {who} {describe(due, now)}, reminder number {r.id}", plain)
 
     async def _handle_reminders(self, chat_guid: str) -> None:
         if self.reminders is None:
@@ -294,16 +348,6 @@ class Agent:
 
     async def fire_reminder(self, r: Reminder) -> None:
         await self._say(r.chat_guid, f"⏰ {r.who}: {r.text}")
-
-    async def _needs_facts(self, history) -> bool:
-        """Ask the local model whether the last message needs outside information."""
-        try:
-            async with self._llm_gate:
-                raw = await self.llm.reply(NEEDS_FACTS_SYSTEM, facts_router_messages(history))
-        except Exception as exc:  # noqa: BLE001
-            log_event("router.error", error=exc_name(exc))
-            return False
-        return parse_yes_no(raw)
 
     def _system_for(self, chat_guid: str) -> str:
         """Persona plus whatever notes the bot keeps about this chat."""
@@ -352,6 +396,7 @@ class Agent:
                                            build_messages(self.s.persona, self.s.bot_name, history))
             reaction = parse_reaction(raw)
             if not reaction:
+                log_event("reaction.considered", chat_guid=chat_guid, status="none")
                 return
             await self._say(chat_guid, reaction)
             log_event("reaction.sent", chat_guid=chat_guid, chars=len(reaction))
@@ -396,7 +441,7 @@ class Agent:
         job = ImageJob(chat_guid=chat_guid, prompt=prompt, job_id=uuid.uuid4().hex[:8])
         ahead = self.images.qsize()
         note = "on it, give me a minute" if ahead == 0 else f"on it, {ahead} ahead of you in the queue"
-        await self._say(chat_guid, note, remember=False)
+        await self._say_in_voice(chat_guid, 'you are on it and the picture will take a few minutes' + (' and there are ' + str(ahead) + ' ahead in the queue' if ahead else ''), note)
         await self.images.submit(job)
 
     async def send_image(self, job: ImageJob, png: Path) -> None:
@@ -405,12 +450,12 @@ class Agent:
 
     async def image_failed(self, job: ImageJob, reason: str) -> None:
         if reason == "shutdown":
-            text = "got restarted mid-picture, send that /image again"
+            fact, text = "you got restarted mid-picture and they should ask for the image again", "got restarted mid-picture, send that /image again"
         elif reason == "rejected":
-            text = "not drawing that one, try a different prompt"
+            fact, text = "you are not drawing that one and they should try a different prompt", "not drawing that one, try a different prompt"
         else:
-            text = "that image didn't come out, sorry. try again in a bit?"
-        await self._say(job.chat_guid, text, remember=False)
+            fact, text = "the picture failed and they should try again in a bit", "that image didn't come out, sorry. try again in a bit?"
+        await self._say_in_voice(job.chat_guid, fact, text)
 
     async def _say(self, chat_guid: str, text: str, remember: bool = True) -> None:
         await self.bb.send_text(chat_guid, text)

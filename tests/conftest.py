@@ -79,6 +79,7 @@ def make_settings(**over) -> Settings:
         context_ttl_seconds=3600,
         context_max_messages=5,
         image_enabled=True,
+        voice_acks=False,
     )
     base.update(over)
     return Settings(**base)

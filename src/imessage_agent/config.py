@@ -47,6 +47,9 @@ class Settings(BaseSettings):
     memory_dir: str = ""
     # /remind support. The JSON file holds reminder text, so this is opt-in like MEMORY_DIR.
     reminders_file: str = ""
+    # Phrase command acknowledgements ("on it", "got it, 7pm") in the bot's own voice via
+    # the local model (one short extra call). False = fixed wording.
+    voice_acks: bool = True
     memory_update_every: int = Field(default=15, ge=1)
     memory_max_chars: int = Field(default=3000, ge=200)
 

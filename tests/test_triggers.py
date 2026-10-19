@@ -55,3 +55,18 @@ def test_ask_command_and_yes_no_parsing():
     assert parse_command("/ASK  spaced") == ("ask", "spaced")
     assert parse_yes_no("Yes") and parse_yes_no("yes.") and parse_yes_no("<think>hm</think> yes")
     assert not parse_yes_no("no") and not parse_yes_no("yo") and not parse_yes_no("") and not parse_yes_no("yesterday")
+
+
+def test_parse_intent():
+    from imessage_agent.llm import parse_intent
+
+    assert parse_intent('{"action": "chat"}').action == "chat"
+    i = parse_intent('Sure! {"action": "image", "prompt": "a corgi"}')
+    assert (i.action, i.prompt) == ("image", "a corgi")
+    assert parse_intent('{"action": "image"}').action == "chat"  # no prompt -> chat
+    i = parse_intent('{"action": "remind", "when": "at 7pm", "what": "draft"}')
+    assert (i.action, i.when, i.what) == ("remind", "at 7pm", "draft")
+    assert parse_intent('{"action": "remind", "when": "at 7pm"}').action == "chat"
+    assert parse_intent('{"action": "nuke"}').action == "chat"
+    assert parse_intent("garbage").action == "chat"
+
