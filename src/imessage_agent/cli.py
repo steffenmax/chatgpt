@@ -77,7 +77,7 @@ async def cmd_check(s: Settings, args) -> int:
     for line in egress_report(s):
         print(line)
     for purpose, host in s.outbound_hosts():
-        if not is_loopback_host(host) and not purpose.startswith("Anthropic API"):
+        if not is_loopback_host(host) and not purpose.startswith(("Anthropic API", "OpenAI API")):
             print(f"!! {purpose} is not on loopback ({host}); message content would leave this Mac.")
             ok = False
     print()
@@ -113,8 +113,19 @@ async def cmd_check(s: Settings, args) -> int:
             await ol.aclose()
 
     if s.image_enabled:
-        path = shutil.which(s.mflux_command)
-        print(f"mflux: {'found at ' + path if path else 'NOT found (uv tool install mflux); /image will be disabled'}")
+        if s.image_backend == "openai":
+            from .imagegen import OpenAIImageGenerator
+
+            gen = OpenAIImageGenerator(s.openai_api_key, s.openai_image_model, timeout=15)
+            try:
+                good = bool(s.openai_api_key) and await gen.check()
+            finally:
+                await gen.aclose()
+            print(f"OpenAI images: {'key OK, model ' + s.openai_image_model if good else 'NOT usable (key missing/invalid or model unavailable)'}")
+            ok = ok and good
+        else:
+            path = shutil.which(s.mflux_command)
+            print(f"mflux: {'found at ' + path if path else 'NOT found (uv tool install mflux); /image will be disabled'}")
     else:
         print("mflux: image generation disabled")
     print("\nRESULT:", "OK" if ok else "problems found")

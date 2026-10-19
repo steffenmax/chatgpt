@@ -73,6 +73,14 @@ class Settings(BaseSettings):
 
     # --- image generation (mflux, always local) ---
     image_enabled: bool = True
+    # "mflux" = local FLUX on this Mac (default). "openai" = OpenAI's image API:
+    # fast and good, but every /image prompt leaves the Mac. Needs OPENAI_API_KEY.
+    image_backend: Literal["mflux", "openai"] = "mflux"
+    openai_api_key: str = ""
+    openai_image_model: str = "gpt-image-1"
+    openai_image_size: str = "1024x1024"
+    openai_image_quality: Literal["low", "medium", "high", "auto"] = "medium"
+    openai_timeout_seconds: float = Field(default=120.0, gt=0)
     mflux_command: str = "mflux-generate"
     mflux_model: str = "schnell"
     mflux_steps: int = Field(default=4, ge=1, le=100)
@@ -147,6 +155,8 @@ class Settings(BaseSettings):
             hosts.append(("Anthropic API (cloud text mode)", "api.anthropic.com:443"))
         elif self.cloud_facts_enabled:
             hosts.append(("Anthropic API (fact lookups)", "api.anthropic.com:443"))
+        if self.image_enabled and self.image_backend == "openai":
+            hosts.append(("OpenAI API (image generation)", "api.openai.com:443"))
         return hosts
 
     @property
@@ -166,6 +176,8 @@ class Settings(BaseSettings):
             problems.append("CLOUD_LLM_ENABLED=true but ANTHROPIC_API_KEY is empty.")
         if self.cloud_facts_enabled and not self.anthropic_api_key:
             problems.append("CLOUD_FACTS_ENABLED=true but ANTHROPIC_API_KEY is empty.")
+        if self.image_enabled and self.image_backend == "openai" and not self.openai_api_key:
+            problems.append("IMAGE_BACKEND=openai but OPENAI_API_KEY is empty.")
         if not self.allowed_chat_guids:
             problems.append(
                 "ALLOWED_CHAT_GUIDS is empty; the bot will answer nowhere. "

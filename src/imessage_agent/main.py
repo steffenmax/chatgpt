@@ -17,7 +17,7 @@ from .memory import MemoryStore
 from .context import ContextStore
 from .egress import print_egress_report
 from .handler import Agent, SenderResolver
-from .imagegen import ImageQueue, MfluxGenerator
+from .imagegen import OpenAIImageGenerator, ImageQueue, MfluxGenerator
 from .llm import AnthropicBackend, OllamaBackend, TextBackend
 from .logsafe import exc_name, install_logging, log_event
 
@@ -62,7 +62,7 @@ def create_app(settings: Settings | None = None, agent: Agent | None = None) -> 
     settings = settings or Settings()
     install_logging(
         settings.log_level,
-        secrets=[settings.bluebubbles_password, settings.webhook_secret, settings.anthropic_api_key],
+        secrets=[settings.bluebubbles_password, settings.webhook_secret, settings.anthropic_api_key, settings.openai_api_key],
     )
 
     @asynccontextmanager
@@ -156,6 +156,7 @@ def create_app(settings: Settings | None = None, agent: Agent | None = None) -> 
             "cloud_llm_enabled": settings.cloud_llm_enabled,
             "cloud_facts_enabled": ag.cloud is not None,
             "memory_enabled": ag.memory is not None,
+            "image_backend": settings.image_backend if ag.images else None,
             "image_queue": ag.images.qsize() if ag.images else None,
             "chats_with_context": ag.context.chat_count(),
             "allowlisted_chats": len(settings.allowed_chat_guids),
@@ -185,20 +186,30 @@ def _build_agent(settings: Settings) -> Agent:
     agent_holder: dict[str, Agent] = {}
 
     if settings.image_enabled:
-        gen = MfluxGenerator(
-            command=settings.mflux_command,
-            model=settings.mflux_model,
-            steps=settings.mflux_steps,
-            quantize=settings.mflux_quantize,
-            width=settings.mflux_width,
-            height=settings.mflux_height,
-            extra_args=settings.mflux_extra_args,
-            timeout=settings.image_timeout_seconds,
-        )
+        gen: MfluxGenerator | OpenAIImageGenerator
+        if settings.image_backend == "openai":
+            gen = OpenAIImageGenerator(
+                api_key=settings.openai_api_key,
+                model=settings.openai_image_model,
+                size=settings.openai_image_size,
+                quality=settings.openai_image_quality,
+                timeout=settings.openai_timeout_seconds,
+            )
+        else:
+            gen = MfluxGenerator(
+                command=settings.mflux_command,
+                model=settings.mflux_model,
+                steps=settings.mflux_steps,
+                quantize=settings.mflux_quantize,
+                width=settings.mflux_width,
+                height=settings.mflux_height,
+                extra_args=settings.mflux_extra_args,
+                timeout=settings.image_timeout_seconds,
+            )
         if not gen.available():
             print(
-                f"WARNING: IMAGE_ENABLED=true but `{settings.mflux_command}` not found on PATH; "
-                "/image will answer that images are off.",
+                f"WARNING: IMAGE_ENABLED=true but image backend `{settings.image_backend}` is not usable "
+                f"({settings.mflux_command} not on PATH, or OPENAI_API_KEY empty); /image will answer that images are off.",
                 file=sys.stderr,
             )
         else:
@@ -209,7 +220,8 @@ def _build_agent(settings: Settings) -> Agent:
                 await agent_holder["a"].image_failed(job, reason)
 
             before = None
-            if settings.unload_llm_before_image and isinstance(llm, OllamaBackend):
+            # Only the local generator competes with the LLM for RAM.
+            if settings.unload_llm_before_image and isinstance(llm, OllamaBackend) and isinstance(gen, MfluxGenerator):
                 before = llm.unload
             images = ImageQueue(gen, _send, _fail, before_generate=before, gate=llm_gate)
 

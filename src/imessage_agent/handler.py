@@ -355,6 +355,8 @@ class Agent:
     async def image_failed(self, job: ImageJob, reason: str) -> None:
         if reason == "shutdown":
             text = "got restarted mid-picture, send that /image again"
+        elif reason == "rejected":
+            text = "not drawing that one, try a different prompt"
         else:
             text = "that image didn't come out, sorry. try again in a bit?"
         await self._say(job.chat_guid, text, remember=False)

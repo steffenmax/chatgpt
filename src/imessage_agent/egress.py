@@ -39,6 +39,15 @@ def egress_report(settings: Settings) -> list[str]:
         ]
     else:
         lines.append("  Cloud text mode is OFF. No message content leaves this machine.")
+    if settings.image_enabled and settings.image_backend == "openai":
+        lines += [
+            "",
+            "=" * 72,
+            "  WARNING: IMAGE_BACKEND=openai",
+            f"  Every /image prompt is sent to api.openai.com (model {settings.openai_image_model}).",
+            "  Set IMAGE_BACKEND=mflux to generate images on this Mac instead.",
+            "=" * 72,
+        ]
     return lines
 
 

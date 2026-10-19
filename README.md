@@ -201,6 +201,7 @@ The LaunchAgent starts at login, restarts on crash (`KeepAlive`), and logs to `~
 | Message text of allowlisted chats | RAM of the bot process (`ContextStore`), max N per chat | Until 6 h idle, `/forget`, or process restart | No (unless cloud text mode is on) |
 | Message text of all chats the bot account is in | Messages.app `chat.db` and BlueBubbles' own SQLite under `~/Library/Application Support/bluebubbles-server` | Apple/BlueBubbles retention; not controlled by this bot | Only via Apple's iMessage delivery (end-to-end encrypted); Messages in iCloud should be off for the bot account |
 | Notes about people and the group (`MEMORY_DIR`, off by default) | Markdown files, one per chat, 0600 | Until you delete or edit them | No |
+| Image prompts with `IMAGE_BACKEND=openai` | Sent to api.openai.com for that one request | OpenAI's retention | Yes, the prompt only |
 | Image prompts | RAM; a `0600` temp file in a `0700` temp dir for the duration of one mflux run | Deleted when the job finishes | No, ever |
 | Generated images | Temp dir until sent, then sent through BlueBubbles to iMessage | Deleted right after sending | Only to the chat that asked |
 | Bot replies | Sent through BlueBubbles; kept in RAM context like any other message | As above | Only to the chat |
@@ -210,6 +211,8 @@ The LaunchAgent starts at login, restarts on crash (`KeepAlive`), and logs to `~
 **What is logged:** event type, chat GUID, message GUID, command kind, durations, queue length, HTTP status, exception class names, timestamps. The logging helper only accepts an allow-list of field names and raises if code tries to log anything else; a filter additionally scrubs all three secrets from every record (including URLs inside HTTP exceptions). uvicorn's access log is disabled because it would print the webhook query string. Tests assert that message text, prompts, bot replies and secrets never appear in captured logs.
 
 **Network:** the process opens connections only to the hosts printed at startup: BlueBubbles (`127.0.0.1:1234`), Ollama (`127.0.0.1:11434`) and, only if `CLOUD_LLM_ENABLED=true`, `api.anthropic.com:443`. The server refuses to bind to anything but loopback. There is no telemetry, update check, crash reporter or analytics. Model downloads (`ollama pull`, mflux's first run) are separate one-time downloads of public weights.
+
+**OpenAI images (`IMAGE_BACKEND=openai`, default `mflux`):** `/image` prompts go to OpenAI's image API instead of local FLUX. Much faster and no RAM contention with the LLM, but the prompt leaves the Mac and each image is billed. Needs `OPENAI_API_KEY`; a boxed warning is printed at startup.
 
 **Cloud fact lookups (`CLOUD_FACTS_ENABLED=true`, default off):** a lighter middle ground. Replies stay local unless the local model judges that the last message needs outside or current information (scores, news, schedules, prices), or someone uses `/ask`. Only those mentions send the triggering message plus that chat's rolling context to the Anthropic API, which answers with web search (`CLOUD_FACTS_MAX_SEARCHES` per reply). The log records every escalation as `event=llm.escalate` with the reason (`router` or `command`). Needs `ANTHROPIC_API_KEY` and `uv sync --extra cloud`.
 
