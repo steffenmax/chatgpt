@@ -320,7 +320,7 @@ async def test_memory_notes_written_and_injected(clock, tmp_path):
     bb, llm = FakeBB(), RecordingLLM()
     ctx = ContextStore(10, 3600, clock=clock)
     mem = MemoryStore(s.memory_dir, s.memory_max_chars, s.memory_update_every)
-    agent = Agent(s, bb, llm, ctx, images=None, resolver=SenderResolver(None, {}, use_contacts=False), memory=mem)  # type: ignore[arg-type]
+    agent = Agent(s, bb, llm, ctx, images=None, resolver=SenderResolver(None, {"+15550001111": "Alex"}, use_contacts=False), memory=mem)  # type: ignore[arg-type]
     await agent.process(message("hey", guid="m1"))
     await agent.drain()
     assert not mem.path_for(ALLOWED).exists(), "not yet: every 2nd message"

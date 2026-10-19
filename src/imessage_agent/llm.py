@@ -57,20 +57,29 @@ REACTION_ADDENDUM = (
 
 MEMORY_SYSTEM = (
     "You keep private notes for {bot_name} about one group chat so {bot_name} can talk to these people "
-    "like it knows them. You get the current notes and the most recent messages. Output the UPDATED "
-    "notes as plain markdown and nothing else, under {max_chars} characters, with exactly these sections: "
-    "'## People' (one bullet per person: how they text, personality tells, what they care about, running "
-    "jokes about them) and '## Group' (dynamics, inside jokes, recurring topics, who ribs whom). Keep what "
-    "is still true, merge new tells, drop stale or trivial stuff, prefer durable traits over one-off events. "
-    "Never include phone numbers, emails, addresses, or anything that looks like a secret, and never copy "
+    "like it knows them. You get the current notes, the list of people who actually send messages here, "
+    "and the most recent messages. Output the UPDATED notes as plain markdown and nothing else, under "
+    "{max_chars} characters, with exactly these sections:\n"
+    "## People: one bullet per real member, and ONLY the members listed. How they text, what they care "
+    "about, their sense of humor, what they're known for in the group. Never add anyone else here.\n"
+    "## Running bits: recurring jokes, nicknames, invented characters or stories (including ones "
+    "{bot_name} started), labeled as bits, with who's in on them.\n"
+    "## Group: dynamics, recurring topics, who ribs whom, plans that come up.\n"
+    "Rules: 1) Only write what the messages show. Lines marked '(you)' are {bot_name}'s own words: they "
+    "are never evidence about a person, only possible bits. 2) Something earns a bullet when it shows "
+    "up more than once or someone states it about themselves; one-off noise stays out. 3) Record traits "
+    "and jokes, not insults people threw at each other, and never slurs. 4) Keep what is still true, "
+    "merge new tells, drop stale or trivial stuff. 5) Never include phone numbers, emails, addresses, or "
     "long quotes. If nothing new was learned, output the current notes unchanged."
 )
 
 
-def memory_messages(current_notes: str, history: list[ContextMessage]) -> list[dict[str, str]]:
-    lines = [f"{m.sender}: {m.text}" for m in history]
+def memory_messages(current_notes: str, history: list[ContextMessage], bot_name: str = "", members: list[str] | None = None) -> list[dict[str, str]]:
+    lines = [f"{bot_name or m.sender} (you): {m.text}" if m.from_bot else f"{m.sender}: {m.text}" for m in history]
+    who = ", ".join(members) if members else "(nobody has spoken yet)"
     content = (
         "Current notes:\n" + (current_notes.strip() or "(none yet)") +
+        "\n\nPeople who actually send messages in this chat (the only names allowed under ## People): " + who +
         "\n\nRecent messages:\n" + "\n".join(lines) +
         "\n\nOutput the updated notes now."
     )

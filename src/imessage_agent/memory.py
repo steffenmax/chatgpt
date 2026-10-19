@@ -17,6 +17,66 @@ from .context import ContextMessage
 from .llm import MEMORY_SYSTEM, TextBackend, memory_messages
 from .logsafe import exc_name, log_event
 
+SECTION_ORDER = ["People", "Running bits", "Group"]
+
+
+def _first_token(name: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", name.strip().split()[0].lower()) if name.strip() else ""
+
+
+def _split_sections(notes: str) -> dict[str, list[str]]:
+    sections: dict[str, list[str]] = {}
+    current = None
+    for raw in notes.splitlines():
+        line = raw.rstrip()
+        m = re.match(r"^##\s+(.+?)\s*$", line)
+        if m:
+            current = m.group(1).strip()
+            sections.setdefault(current, [])
+            continue
+        if current is not None and line.strip():
+            sections[current].append(line)
+    return sections
+
+
+def _bullet_name(line: str) -> str:
+    m = re.match(r"^\s*[-*]\s*\**([^:*]+?)\**\s*:", line)
+    return m.group(1).strip() if m else ""
+
+
+def ground_notes(notes: str, members: list[str]) -> str:
+    """Enforce the one rule a prompt can't: ## People holds only real senders.
+
+    Bullets about anyone else are moved to ## Running bits, tagged, so a character
+    the bot or the chat invented stays a bit instead of becoming a member.
+    """
+    sections = _split_sections(notes)
+    if "People" not in sections:
+        return ""
+    known = {_first_token(m) for m in members if m.strip()}
+    keep, moved = [], []
+    for line in sections["People"]:
+        name = _bullet_name(line)
+        if not name:
+            continue  # stray prose under People
+        if _first_token(name) in known:
+            keep.append(line)
+        else:
+            body = line.split(":", 1)[1].strip() if ":" in line else line.strip("-* ")
+            moved.append(f"- {name} (not a member, a bit): {body}")
+    sections["People"] = keep
+    if moved:
+        sections.setdefault("Running bits", [])
+        existing = {_bullet_name(l).lower() for l in sections["Running bits"]}
+        sections["Running bits"] += [l for l in moved if _bullet_name(l).lower() not in existing]
+    out = []
+    for title in SECTION_ORDER + [t for t in sections if t not in SECTION_ORDER]:
+        if title in sections or title in SECTION_ORDER:
+            out.append(f"## {title}")
+            out += sections.get(title, [])
+            out.append("")
+    return "\n".join(out).strip() + "\n"
+
 
 class MemoryStore:
     def __init__(self, directory: str, max_chars: int = 3000, update_every: int = 15):
@@ -62,16 +122,21 @@ class MemoryStore:
 
     async def update(self, chat_guid: str, bot_name: str, history: list[ContextMessage], llm: TextBackend) -> bool:
         current = self.load(chat_guid)
+        members: list[str] = []
+        for m in history:
+            if not m.from_bot and m.sender and m.sender not in members:
+                members.append(m.sender)
         system = MEMORY_SYSTEM.replace("{bot_name}", bot_name).replace("{max_chars}", str(self.max_chars))
-        raw = await llm.reply(system, memory_messages(current, history))
+        raw = await llm.reply(system, memory_messages(current, history, bot_name, members))
         notes = (raw or "").strip()
         if notes.startswith("```"):
             notes = notes.strip("`").strip()
             if notes.lower().startswith("markdown"):
                 notes = notes[8:].strip()
+        notes = ground_notes(notes, members)
         if len(notes) > self.max_chars:
             notes = notes[: self.max_chars].rstrip()
-        if not notes or "## People" not in notes or notes == current.strip():
+        if not notes or notes.strip() == current.strip():
             return False
         self.save(chat_guid, notes)
         log_event("memory.updated", chat_guid=chat_guid, chars=len(notes))
