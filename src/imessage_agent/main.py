@@ -19,7 +19,10 @@ from .reminders import ReminderStore
 from .brief import CultureBrief
 from .task import TaskRunner
 from .linkreader import LinkReader
+from .alerts import SportsAlerts, parse_teams
+from .bookie import Bookie
 from .media import GifSearch, TweetFinder
+from .sports import ESPN
 from .vision import OllamaVision
 from .context import ContextStore
 from .egress import print_egress_report
@@ -178,6 +181,11 @@ def create_app(settings: Settings | None = None, agent: Agent | None = None, env
         brief_task = (
             asyncio.create_task(ag.brief.run_forever(), name="brief") if getattr(ag, "brief", None) is not None else None
         )
+        sports_task = (
+            asyncio.create_task(ag.sports_poller.run_forever(), name="sports")
+            if getattr(ag, "sports_poller", None) is not None
+            else None
+        )
         reminder_task = (
             asyncio.create_task(ag.reminders.run(ag.fire_reminder), name="reminders")
             if ag.reminders is not None
@@ -194,6 +202,8 @@ def create_app(settings: Settings | None = None, agent: Agent | None = None, env
             yield
         finally:
             sweeper.cancel()
+            if sports_task is not None:
+                sports_task.cancel()
             if reminder_task is not None:
                 reminder_task.cancel()
             if brief_task is not None:
@@ -203,7 +213,7 @@ def create_app(settings: Settings | None = None, agent: Agent | None = None, env
                 await ag.images.stop()
             await ag.stop_task()
             await ag.drain()
-            for client in (ag.links, ag.gifs, ag.tweets):
+            for client in (ag.links, ag.gifs, ag.tweets, getattr(ag, "espn", None)):
                 if client is not None:
                     await client.aclose()
             ag.context.forget_all()  # context never survives a restart
@@ -274,6 +284,8 @@ def create_app(settings: Settings | None = None, agent: Agent | None = None, env
             "links_enabled": ag.links is not None,
             "gifs_enabled": ag.gifs is not None,
             "tweets_enabled": ag.tweets is not None,
+            "sports_alerts": bool(getattr(ag, "sports_poller", None) and ag.sports_poller.teams),
+            "bookie_enabled": getattr(ag, "bookie", None) is not None,
             "task_enabled": ag.tasks is not None,
             "brief_enabled": ag.brief is not None,
             "brief_source": ag.brief.source if ag.brief is not None else None,
@@ -385,6 +397,21 @@ def _build_agent(settings: Settings) -> Agent:
         if settings.tweets_enabled and settings.x_bearer_token
         else None,
     )
+    sports_on = (settings.sports_alerts or settings.bookie_enabled) and settings.sports_chat_guids
+    if sports_on:
+        data_dir = Path(settings.memory_dir or "~/Library/Application Support/imessage-agent/memory").expanduser().parent
+        espn = ESPN()
+        fans = parse_teams(settings.sports_teams)
+        agent.espn, agent.sports_fans = espn, fans
+        if settings.bookie_enabled:
+            agent.bookie = Bookie(str(data_dir / "bookie.json"), settings.bookie_start, settings.bookie_bailout)
+        # One poller: alerts for followed teams (if on) and settling bets (if the book is open).
+        agent.sports_poller = SportsAlerts(
+            espn, fans if settings.sports_alerts else {}, str(data_dir / "sports-state.json"),
+            on_alert=agent.on_alert, on_games=agent.on_games if settings.bookie_enabled else None,
+            watch_extra=agent.bookie.open_game_ids if agent.bookie is not None else None,
+            field_goals=settings.sports_field_goals,
+        )
     agent_holder["a"] = agent
     return agent
 

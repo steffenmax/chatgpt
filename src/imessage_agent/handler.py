@@ -56,7 +56,10 @@ from .llm import (
 from .llm import OllamaBackend
 from .linkreader import LinkReader, find_urls, strip_cards
 from .logsafe import exc_name, log_event
+from .alerts import Alert
+from .bookie import Bookie, odds_line, parse_bet
 from .media import GifSearch, TweetFinder, clean_query, describe_tweet, gif_from_reaction
+from .sports import ESPN, Game, TeamIndex, fmt_odds
 from .memory import MemoryStore
 from .reminders import MAX_DAYS_AHEAD, Reminder, ReminderStore, describe, parse
 from .task import TaskRunner
@@ -70,6 +73,14 @@ def _norm_addr(a: str | None) -> str:
     a = (a or "").strip().lower()
     return a if "@" in a else re.sub(r"[^\d+]", "", a)
 _ECHOED_INSTRUCTION = re.compile(r"^\s*\w+\s*:|plain version|confirm that|let(ting)? the chat know|\bthey should\b")
+BET_QUIPS = (
+    "bold.", "the house thanks you", "i'll frame the receipt", "brave. stupid, but brave", "noted. in pen",
+    "your funeral", "love the confidence", "this is how it starts", "i've seen worse. not many", "say less",
+)
+BAILOUT_YES = ("fine. {n} bucks, don't make me regret it", "here's {n}. this is going on your permanent record",
+               "{n} bucks from the ricky relief fund. pathetic")
+BAILOUT_NO = ("you're not broke enough", "nice try, you've got money or bets riding", "one bailout a week, degenerate")
+
 # What the bot says when it takes an image request (picked at random, never twice in a row).
 IMAGE_ACKS = (
     "mmm.", "say less", "lemme cook", "the kitchen is open", "firing up the oven", "oh you sick puppy. one sec",
@@ -155,6 +166,9 @@ class Agent:
         links: LinkReader | None = None,
         gifs: GifSearch | None = None,
         tweets: TweetFinder | None = None,
+        espn: ESPN | None = None,
+        bookie: Bookie | None = None,
+        sports_fans: dict[str, list[str]] | None = None,
     ):
         self.s = settings
         self.bb = bb
@@ -175,6 +189,11 @@ class Agent:
         # Optional GIF search (GIPHY) and funny-tweet search (X); see media.py.
         self.gifs = gifs
         self.tweets = tweets
+        # NFL: ESPN client, the fake-money book, and who in the chat roots for whom.
+        self.espn = espn
+        self.bookie = bookie
+        self.sports_fans = sports_fans or {}
+        self.sports_poller = None  # alerts.SportsAlerts, set by main when NFL features are on
         self._link_reads: dict[str, set[asyncio.Task]] = {}
         self._task_job: asyncio.Task | None = None
         self._task_chat: str | None = None
@@ -323,6 +342,9 @@ class Agent:
                 self._maybe_react(chat_guid)
             return "stored"
 
+        # "ricky 50 on the jets" is a bet, not chat
+        if trigger.kind == "mention" and self._bookie_here(chat_guid) and parse_bet(text):
+            trigger = Trigger("bet", text)
         if trigger.kind in ("mention", "ask") and self._muted(chat_guid):
             log_event("trigger", chat_guid=chat_guid, kind=trigger.kind, status="muted")
             return "muted"
@@ -342,6 +364,7 @@ class Agent:
                         task=self.tasks is not None and chat_guid in self.s.task_chat_guids,
                         gifs=self.gifs is not None,
                         tweets=self.tweets is not None,
+                        bookie=self._bookie_here(chat_guid),
                     ),
                 )
             elif trigger.kind == "forget":
@@ -354,6 +377,8 @@ class Agent:
                 await self._handle_unmute(chat_guid)
             elif trigger.kind == "image":
                 await self._handle_image(chat_guid, trigger.arg)
+            elif trigger.kind in ("bet", "odds", "bets", "bank", "leaderboard", "bailout"):
+                await self._handle_book(chat_guid, trigger.kind, trigger.arg, sender, address)
             elif trigger.kind == "gif":
                 await self._handle_gif(chat_guid, trigger.arg)
             elif trigger.kind == "tweet":
@@ -1090,6 +1115,145 @@ class Agent:
                     "or wildest part, a roast, or a reply that caught your eye. Don't ask if anyone saw it."))
         except Exception as exc:  # noqa: BLE001
             log_event("handler.error", chat_guid=chat_guid, kind="quiet_link", error=exc_name(exc))
+
+    # ------------------------------------------------------------------ NFL
+    def _bookie_here(self, chat_guid: str) -> bool:
+        return self.bookie is not None and self.espn is not None and chat_guid in self.s.sports_chat_guids
+
+    def _fan_of(self, name: str) -> str | None:
+        """Which followed team this person roots for: full name first, first name only if unambiguous."""
+        full = (name or "").strip().lower()
+        for abbr, fans in self.sports_fans.items():
+            if any(f.lower() == full for f in fans):
+                return abbr
+        first = full.split(" ")[0] if full else ""
+        hits = {abbr for abbr, fans in self.sports_fans.items() for f in fans if f.split(" ")[0].lower() == first}
+        return hits.pop() if len(hits) == 1 else None
+
+    async def _handle_book(self, chat_guid: str, kind: str, arg: str, name: str, address: str | None) -> None:
+        if not self._bookie_here(chat_guid):
+            await self._say(chat_guid, "the book's closed in here", remember=False)
+            return
+        who = _norm_addr(address) or name
+        book = self.bookie
+        if kind == "bank":
+            p = book._player(chat_guid, who, name)
+            riding = sum(b["stake"] for b in book.open_bets(chat_guid) if b["who"] == who)
+            await self._say(chat_guid, f"{name}: {book.balance(chat_guid, who, name)} bucks"
+                            + (f", {riding} riding" if riding else "") + f" ({p['won']}-{p['lost']})")
+            return
+        if kind == "bailout":
+            ok, bal = book.bailout(chat_guid, who, name)
+            await self._say(chat_guid, random.choice(BAILOUT_YES).replace("{n}", str(bal)) if ok else
+                            random.choice(BAILOUT_NO))
+            return
+        if kind == "leaderboard":
+            rows = book.leaderboard(chat_guid)
+            if not rows:
+                await self._say(chat_guid, "nobody's bet yet. cowards", remember=False)
+                return
+            lines = [f"{i}. {r['name']} {r['bucks']}" + (f" (+{r['at_risk']} riding)" if r["at_risk"] else "")
+                     + f" {r['won']}-{r['lost']}" + (" 🪦" * min(r["bailouts"], 3)) for i, r in enumerate(rows, 1)]
+            await self._say(chat_guid, "🏦 the book\n" + "\n".join(lines))
+            return
+        if kind == "bets":
+            bets = book.open_bets(chat_guid)
+            if not bets:
+                await self._say(chat_guid, "nothing riding. boring", remember=False)
+                return
+            await self._say(chat_guid, "riding:\n" + "\n".join(
+                f"{b['name']} {b['stake']} on {b['team_name']} ({fmt_odds(b['odds'])}) to win {b['to_win']}" for b in bets))
+            return
+        try:
+            games = await self.espn.upcoming()  # type: ignore[union-attr]
+        except Exception as exc:  # noqa: BLE001
+            log_event("bookie.odds_failed", error=exc_name(exc))
+            await self._say(chat_guid, "can't reach the lines right now, try in a bit", remember=False)
+            return
+        idx = TeamIndex.from_games(games)
+        if kind == "odds":
+            team = idx.find(arg) if arg.strip() else None
+            pre = [g for g in games if g.state == "pre" and (team is None or g.team(team))]
+            if not pre:
+                await self._say(chat_guid, "no games on the board right now", remember=False)
+                return
+            await self._say(chat_guid, f"week {pre[0].week} lines (moneyline):\n" + "\n".join(odds_line(g) for g in pre[:16]))
+            return
+        parsed = parse_bet(arg) or parse_bet(arg, loose=True)
+        if parsed is None:
+            await self._say(chat_guid, "how much on who? like: /bet 50 jets", remember=False)
+            return
+        stake, team_text = parsed
+        team = idx.find(team_text)
+        game = next((g for g in games if team and g.team(team)), None)
+        if team is None or game is None:
+            await self._say(chat_guid, "who? i don't have them on the board this week", remember=False)
+            return
+        bet = book.place(chat_guid, who, name, game, team, stake)
+        if isinstance(bet, str):
+            msg = {"started": f"{game.matchup} already kicked off, book's closed on it",
+                   "too_much": f"you've got {book.balance(chat_guid, who, name)} bucks, relax",
+                   "broke": "you're broke. /bailout if you've got no shame",
+                   "zero": "bet something real"}.get(bet, "can't take that one")
+            await self._say(chat_guid, msg, remember=False)
+            return
+        quip = random.choice(BET_QUIPS)
+        if self._fan_of(name) and self._fan_of(name) == game.other(team).abbr:
+            quip = "betting against your own team. cold blooded"
+        await self._say(chat_guid, f"locked: {name} {bet['stake']} on the {bet['team_name']} ({fmt_odds(bet['odds'])}) vs the "
+                        f"{bet['opp_name']}, pays {bet['to_win']}. {book.balance(chat_guid, who, name)} left. {quip}")
+        log_event("bookie.bet", chat_guid=chat_guid, count=bet["stake"])
+
+    async def on_games(self, games: list[Game]) -> None:
+        """Every sports poll: settle finished games that have bets on them."""
+        if self.bookie is None:
+            return
+        have = {(g.week, g.season_type) for g in games}
+        extra = []
+        for week, st in self.bookie.open_weeks() - have:
+            try:
+                extra += await self.espn.scoreboard(week, st)  # type: ignore[union-attr]
+            except Exception as exc:  # noqa: BLE001
+                log_event("bookie.settle_fetch_failed", error=exc_name(exc))
+        for chat_guid, results in self.bookie.settle(games + extra).items():
+            lines = [("✅" if r.result == "won" else "❌" if r.result == "lost" else "➖")
+                     + f" {r.name} {'+' if r.delta > 0 else ''}{r.delta} on the {r.team} → {r.balance}" for r in results]
+            facts = "💰 book settled:\n" + "\n".join(lines)
+            comment = await self._sports_comment(chat_guid, facts, "Roast whoever lost the most and gas up whoever won "
+                                                 "the most, by name. One short line.")
+            await self._say(chat_guid, facts + (f"\n{comment}" if comment else ""))
+            log_event("bookie.settled", chat_guid=chat_guid, count=len(results))
+
+    async def on_alert(self, alert: Alert) -> None:
+        """A live NFL alert: the fact line, plus the bot's one-line reaction."""
+        g = alert.game
+        fans = "; ".join(f"{(g.team(a) or g.home).name} fans in here: {', '.join(n)}" for a, n in alert.fans.items())
+        scorer = g.team(alert.scorer).name if alert.scorer and g.team(alert.scorer) else None
+        how = {"kickoff": "The game just started. Hype the fans in here.",
+               "score": f"{scorer} just scored. Hype their fans in here if any, needle the other side's fans.",
+               "half": "It's halftime. React to how it's going for the fans in here.",
+               "final": f"Game over{', ' + scorer + ' won' if scorer else ', a tie'}. Celebrate with the winners' fans, "
+                        "roast the losers' fans, by name."}[alert.kind]
+        for chat_guid in self.s.sports_chat_guids:
+            if chat_guid not in self._allowed or self._muted(chat_guid):
+                continue
+            comment = await self._sports_comment(chat_guid, alert.text, f"{how} {fans}.")
+            await self._say(chat_guid, alert.text + (f"\n{comment}" if comment else ""))
+
+    async def _sports_comment(self, chat_guid: str, facts: str, how: str) -> str:
+        system = (self._system_for(chat_guid) + f"\n\nYou just posted this sports update in the chat:\n{facts}\n"
+                  f"Now add ONE short line of your own reaction, like a friend watching. {how} Don't repeat the "
+                  "score or any numbers, no links, under 140 characters.")
+        try:
+            async with self._llm_gate:
+                raw = await self.llm.reply(system, [{"role": "user", "content": "(your one line)"}])
+        except Exception as exc:  # noqa: BLE001
+            log_event("sports.comment_failed", error=exc_name(exc))
+            return ""
+        line = strip_fake_notes(clean_reply(raw, self.s.bot_name)).split("\n")[0].strip()
+        if not line or len(line) > 160 or is_refusal(line) or not afterword_ok(facts, line):
+            return ""
+        return line
 
     async def _handle_gif(self, chat_guid: str, query: str) -> None:
         if self.gifs is None:

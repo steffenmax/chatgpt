@@ -125,6 +125,16 @@ class Settings(BaseSettings):
     # and a sandbox folder. Only from the chats listed in TASK_CHAT_GUIDS. Off by default.
     task_enabled: bool = False
     task_chat_guids: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    # --- NFL alerts and the bookie (sports.py, alerts.py, bookie.py) ---
+    # Chats that get live alerts and can bet. Followed teams and their fans, for context:
+    # "NYG=Max,Joe;NYJ=Chris Oddo". ESPN's public API, no key.
+    sports_chat_guids: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    sports_teams: str = ""
+    sports_alerts: bool = False
+    sports_field_goals: bool = True
+    bookie_enabled: bool = False
+    bookie_start: int = Field(default=1000, ge=1)
+    bookie_bailout: int = Field(default=100, ge=1)
     # Who may start a task and answer its questions (phone numbers / emails as iMessage
     # reports them). Empty = anyone in the task chats.
     task_owner_addresses: Annotated[list[str], NoDecode] = Field(default_factory=list)
@@ -215,7 +225,7 @@ class Settings(BaseSettings):
     # --- logging ---
     log_level: str = "INFO"
 
-    @field_validator("allowed_chat_guids", "task_chat_guids", "task_owner_addresses", mode="before")
+    @field_validator("allowed_chat_guids", "task_chat_guids", "task_owner_addresses", "sports_chat_guids", mode="before")
     @classmethod
     def _split_guids(cls, v):
         if isinstance(v, str):
@@ -305,6 +315,8 @@ class Settings(BaseSettings):
             hosts.append(("GIPHY (GIF search, words from the chat)", "api.giphy.com:443, media*.giphy.com:443"))
         if self.tweets_enabled and self.x_bearer_token:
             hosts.append(("X API (tweet search, words from the chat)", "api.x.com:443"))
+        if (self.sports_alerts or self.bookie_enabled) and self.sports_chat_guids:
+            hosts.append(("ESPN scores and odds (no chat content)", "site.api.espn.com:443"))
         if self.task_enabled:
             hosts.append(("Anthropic API (/task agent)", "api.anthropic.com:443"))
             hosts.append(("Web pages fetched during /task", "any website:443"))

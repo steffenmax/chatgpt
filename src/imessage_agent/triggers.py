@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-Kind = Literal["mention", "ask", "image", "help", "forget", "remind", "reminders", "task", "mute", "unmute", "gif", "tweet", "none"]
+Kind = Literal["mention", "ask", "image", "help", "forget", "remind", "reminders", "task", "mute", "unmute", "gif", "tweet", "bet", "odds", "bets", "bank", "leaderboard", "bailout", "none"]
 
 
 @dataclass(frozen=True)
@@ -19,6 +19,8 @@ _COMMANDS = {
     "/image": "image", "/img": "image", "/ask": "ask", "/help": "help", "/forget": "forget",
     "/remind": "remind", "/reminders": "reminders", "/task": "task", "/mute": "mute", "/unmute": "unmute",
     "/gif": "gif", "/tweet": "tweet",
+    "/bet": "bet", "/odds": "odds", "/bets": "bets", "/bank": "bank", "/balance": "bank",
+    "/leaderboard": "leaderboard", "/board": "leaderboard", "/bailout": "bailout",
 }
 
 DEFAULT_MUTE_SECONDS = 2 * 60
@@ -99,7 +101,7 @@ def detect(text: str | None, bot_name: str) -> Trigger:
 
 
 def help_text(bot_name: str, image_enabled: bool, cloud_facts: bool = False, reminders: bool = False, task: bool = False,
-              gifs: bool = False, tweets: bool = False) -> str:
+              gifs: bool = False, tweets: bool = False, bookie: bool = False) -> str:
     where = "most of it runs on one mac" if cloud_facts else "everything i do runs on one mac, nothing leaves it"
     lines = [
         f"hey, i'm {bot_name}. {where}.",
@@ -113,6 +115,9 @@ def help_text(bot_name: str, image_enabled: bool, cloud_facts: bool = False, rem
         lines.append("- /gif <what> - i'll find a gif")
     if tweets:
         lines.append("- /tweet <topic> - i'll dig up the most-liked tweet about it (leaves the mac)")
+    if bookie:
+        lines.append("- /odds - this week's lines, /bet 50 jets (or \"ricky 50 on the jets\") - fake money, i'm the book")
+        lines.append("- /bets - what's riding, /bank - your bucks, /leaderboard, /bailout if you're broke")
     if task:
         lines.append("- /task <job> - i'll go research it properly and come back (owner only, takes a few min, leaves the mac)")
     if reminders:
