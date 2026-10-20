@@ -42,8 +42,10 @@ async def test_image_flow_queue_and_cleanup():
     try:
         assert await agent.process(message("/image a corgi surfing", guid="i1")) == "handled:image"
         assert await agent.process(message("/image a cat", guid="i2")) == "handled:image"
-        assert bb.texts[0][1].startswith("on it")
-        assert "ahead" in bb.texts[1][1]
+        from imessage_agent.handler import IMAGE_ACKS, IMAGE_QUEUE_ACKS
+
+        assert bb.texts[0][1] in IMAGE_ACKS
+        assert bb.texts[1][1] in [t.replace("{n}", str(n)) for t in IMAGE_QUEUE_ACKS for n in (1, 2)]
         await asyncio.wait_for(q._queue.join(), timeout=5)
     finally:
         await q.stop()

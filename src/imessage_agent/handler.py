@@ -70,6 +70,22 @@ def _norm_addr(a: str | None) -> str:
     a = (a or "").strip().lower()
     return a if "@" in a else re.sub(r"[^\d+]", "", a)
 _ECHOED_INSTRUCTION = re.compile(r"^\s*\w+\s*:|plain version|confirm that|let(ting)? the chat know|\bthey should\b")
+# What the bot says when it takes an image request (picked at random, never twice in a row).
+IMAGE_ACKS = (
+    "mmm.", "say less", "lemme cook", "the kitchen is open", "firing up the oven", "oh you sick puppy. one sec",
+    "you're nasty for this one", "hold my beer", "art takes time, sit tight", "warming up the paintbrush",
+    "this one's going in the louvre", "ok ok ok", "bet.", "don't rush genius", "chef's kiss incoming",
+    "oh i got you", "say no more", "brb, being an artist", "you're not ready for this", "this might get me banned. on it",
+    "consider it done", "grabbing the crayons", "god forgive me. starting now", "oh this is gonna be good",
+    "cookin.", "unholy. i love it. one sec", "my therapist would hate this. on it", "you've been waiting to ask that huh",
+    "mixing the paints", "witness greatness in a minute", "lock in. drawing", "the vision is coming to me",
+    "absolutely deranged request. starting", "give me a sec to sin", "picasso mode activated",
+)
+IMAGE_QUEUE_ACKS = (
+    "kitchen's backed up, {n} ahead of you", "{n} orders ahead of yours, patience", "wait your turn, {n} in line",
+    "cookin {n} others first, you're next-ish", "{n} ahead of you. art has a line now", "take a number, {n} before you",
+)
+
 # A message without the name, right after the bot spoke, is judged only within this window.
 FOLLOWUP_WINDOW_SECONDS = 30
 
@@ -172,6 +188,7 @@ class Agent:
         self._last_reaction: dict[str, float] = {}
         self._last_reaction_text: dict[str, str] = {}
         self._last_roast: dict[str, str] = {}
+        self._last_image_ack: dict[str, str] = {}
         # message GUID -> {"chat", "who": addresses that laughed, "fired": milestones already said}
         self._laughs: OrderedDict[str, dict[str, Any]] = OrderedDict()
         # chat -> (last unanswered message, when it gets a GIF); one timer task per chat
@@ -1135,14 +1152,11 @@ class Agent:
             prompt = prompt[: self.s.image_prompt_max_chars]
         job = ImageJob(chat_guid=chat_guid, prompt=prompt, job_id=uuid.uuid4().hex[:8])
         ahead = self.images.qsize()
-        note = "on it, give me a minute" if ahead == 0 else f"on it, {ahead} ahead of you in the queue"
-        await self._say_in_voice(
-            chat_guid,
-            "on it, the picture will take me a few minutes"
-            + (f", {ahead} ahead of yours" if ahead else ""),
-            note,
-            keep=(str(ahead),) if ahead else (),
-        )
+        pool = [a.replace("{n}", str(ahead)) for a in IMAGE_QUEUE_ACKS] if ahead else list(IMAGE_ACKS)
+        last = self._last_image_ack.get(chat_guid)
+        ack = random.choice([a for a in pool if a != last] or pool)
+        self._last_image_ack[chat_guid] = ack
+        await self._say(chat_guid, ack)
         await self.images.submit(job)
 
     async def send_image(self, job: ImageJob, png: Path) -> None:

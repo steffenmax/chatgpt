@@ -378,7 +378,9 @@ async def test_natural_language_image_request_queues_an_image(clock):
     finally:
         await q.stop()
     assert gen.prompts == ["a corgi on a surfboard at sunset"]
-    assert bb.texts[0][1].startswith("on it") and len(bb.attachments) == 1
+    from imessage_agent.handler import IMAGE_ACKS
+
+    assert bb.texts[0][1] in IMAGE_ACKS and len(bb.attachments) == 1
 
 
 async def test_natural_language_reminder_sets_one(clock, tmp_path):
@@ -800,3 +802,32 @@ async def test_fake_system_notes_never_reach_the_chat(agent_parts):
     assert "[link" not in bb.texts[-1][1] and "Onion" not in bb.texts[-1][1]
     assert strip_fake_notes("knicks [in 5] lol") == "knicks [in 5] lol"  # ordinary brackets stay
     assert strip_fake_notes("lol [sent a gif: dancing") == "lol"  # unterminated
+
+
+
+async def test_image_acks_vary_and_mention_the_queue(clock):
+    from imessage_agent.handler import IMAGE_ACKS, IMAGE_QUEUE_ACKS
+    from imessage_agent.context import ContextStore
+    from tests.conftest import FakeBB, FakeLLM, make_settings
+
+    class Q:
+        def __init__(self, n):
+            self.n, self.jobs = n, []
+
+        def qsize(self):
+            return self.n
+
+        async def submit(self, job):
+            self.jobs.append(job)
+
+    agent = Agent(make_settings(), FakeBB(), FakeLLM(), ContextStore(10, 3600, clock=clock), images=Q(0),  # type: ignore[arg-type]
+                  resolver=SenderResolver(None, {}, use_contacts=False))
+    sent = []
+    for i in range(12):
+        await agent._handle_image(ALLOWED, "a corgi surfing")
+        sent.append(agent.bb.texts[-1][1])
+    assert all(t in IMAGE_ACKS for t in sent) and all(a != b for a, b in zip(sent, sent[1:]))
+    assert len(set(sent)) > 3
+    agent.images = Q(2)
+    await agent._handle_image(ALLOWED, "a corgi surfing")
+    assert agent.bb.texts[-1][1] in [q.replace("{n}", "2") for q in IMAGE_QUEUE_ACKS]
