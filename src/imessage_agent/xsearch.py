@@ -88,16 +88,16 @@ def _quote(term: str) -> str:
     return f'"{term}"' if " " in term else term
 
 
-def full_query(q: str) -> str:
-    """Append the standard filters unless the query already sets them."""
+def full_query(q: str, filters: str = FILTERS) -> str:
+    """Append the filters (X_QUERY_FILTERS) unless the query already sets them."""
     q = q.strip()
     extra = []
-    for f in FILTERS.split():
+    for f in filters.split():
         op = f.lstrip("-")
         marker = "lang:" if op.startswith("lang:") else op  # any lang: counts; is:x only matches itself
         if marker not in q:
             extra.append(f)
-    return (q + " " + " ".join(extra)).strip()
+    return (q + " " + " ".join(extra)).strip()[:MAX_QUERY_CHARS]
 
 
 def parse_queries(raw: str) -> list[str]:
@@ -157,8 +157,10 @@ class XSearch:
         timeout: float = 30.0,
         transport: httpx.AsyncBaseTransport | None = None,
         clock=time.time,
+        filters: str = FILTERS,
     ):
         self.queries = [q for q in queries if q.strip()][:MAX_QUERIES]
+        self.filters = filters.strip() or FILTERS
         self.posts_per_query = max(MIN_RESULTS, min(MAX_RESULTS, posts_per_query))
         self.lookback_hours = lookback_hours
         self.max_usd = max_usd_per_refresh
@@ -239,7 +241,7 @@ class XSearch:
         sections: list[str] = []
         for query, n in self.plan():
             params = {
-                "query": full_query(query),
+                "query": full_query(query, self.filters),
                 "max_results": n,
                 "sort_order": "relevancy",
                 "start_time": start_time,

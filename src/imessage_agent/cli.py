@@ -150,7 +150,7 @@ def _brief_plan_line(s: Settings) -> str:
         return f"brief: source=web (task agent web search, up to ${s.brief_max_budget_usd:.2f} per refresh)"
     from .xsearch import POST_READ_USD, XSearch
 
-    x = XSearch(s.x_bearer_token, s.x_query_list(), s.x_posts_per_query, s.x_lookback_hours, s.x_max_usd_per_refresh)
+    x = XSearch(s.x_bearer_token, s.x_query_list(), s.x_posts_per_query, s.x_lookback_hours, s.x_max_usd_per_refresh, filters=s.x_query_filters)
     plan = x.plan()
     per = x.estimate_usd()
     writer = "cloud model" if s.anthropic_api_key else f"local model {s.ollama_model}"
@@ -171,9 +171,9 @@ async def cmd_brief(s: Settings, args) -> int:
     if src != "web":
         from .xsearch import XSearch, full_query
 
-        x = XSearch(s.x_bearer_token, s.x_query_list(), s.x_posts_per_query, s.x_lookback_hours, s.x_max_usd_per_refresh)
+        x = XSearch(s.x_bearer_token, s.x_query_list(), s.x_posts_per_query, s.x_lookback_hours, s.x_max_usd_per_refresh, filters=s.x_query_filters)
         for q, n in x.plan():
-            print(f"  {n:3d} posts  {full_query(q)}")
+            print(f"  {n:3d} posts  {full_query(q, x.filters)}")
         await x.aclose()
     if args.plan:
         return 0

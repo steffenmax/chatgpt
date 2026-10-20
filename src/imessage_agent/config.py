@@ -149,6 +149,9 @@ class Settings(BaseSettings):
     x_bearer_token: str = ""
     # One search per ';'-separated item. Empty = derived from BRIEF_TOPICS.
     x_queries: str = ""
+    # Appended to every query unless it already sets them. Add e.g. "-has:links -has:hashtags"
+    # to cut betting touts and spam, or "is:verified" for bigger accounts only.
+    x_query_filters: str = "lang:en -is:retweet -is:reply"
     x_posts_per_query: int = Field(default=15, ge=10, le=100)
     x_lookback_hours: int = Field(default=48, ge=1, le=168)
     x_max_usd_per_refresh: float = Field(default=0.75, gt=0, le=20)

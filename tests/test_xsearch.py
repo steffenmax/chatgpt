@@ -46,6 +46,8 @@ def test_default_topics_map_to_hand_tuned_queries_and_custom_topics_split():
     assert parse_queries(" a OR b ; \"c d\" ;; ") == ["a OR b", '"c d"']
     assert full_query("NFL") == "NFL lang:en -is:retweet -is:reply"
     assert full_query("NFL lang:es is:reply") == "NFL lang:es is:reply -is:retweet"
+    assert full_query("NFL", "-has:links is:verified") == "NFL -has:links is:verified"
+    assert XSearch("t", ["a"], filters="  ").filters == "lang:en -is:retweet -is:reply"
 
 
 def test_default_prose_topics_derive_sanely_too():

@@ -78,6 +78,7 @@ def build_x(settings: Settings, brief_path: Path) -> XSearch | None:
         posts_per_query=settings.x_posts_per_query,
         lookback_hours=settings.x_lookback_hours,
         max_usd_per_refresh=settings.x_max_usd_per_refresh,
+        filters=settings.x_query_filters,
         ledger_path=str(brief_path.parent / "x-spend.json"),
         # the local model's context window is small; the cloud writer can take it all
         digest_max_chars=10000 if local_writer else 40000,
