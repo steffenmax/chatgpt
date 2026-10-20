@@ -95,7 +95,7 @@ async def test_task_command_delivers_text_and_files(tmp_path):
     assert [a[1].name for a in bb.attachments] == ["plan.md"]
     req, who, ctx = runner.calls[0]
     assert req == "find steakhouses near msg" and who == "Max" and ctx == ["Max: we should do steak saturday"]
-    assert any("[finished a task for Max" in m.text for m in agent.context.get(ALLOWED))
+    assert any("[posted task results for Max" in m.text for m in agent.context.get(ALLOWED))
 
 
 async def test_task_only_from_task_chats_and_one_at_a_time():
@@ -254,35 +254,52 @@ async def test_owner_only_tasks_in_a_group():
     assert runner.answer == "5" and bb.texts[-1][1] == "done for 5"
 
 
-async def test_task_agent_is_told_to_write_in_the_bots_voice(tmp_path):
-    seen = {}
+def test_task_agent_returns_plain_facts():
+    from imessage_agent.task import OPERATOR_PROMPT
 
-    async def fake_query(prompt, options):
-        seen["system"] = options["system_prompt"]
-        yield ResultMessage("yo")
-
-    r = TaskRunner("k", "m", str(tmp_path / "t"), query_fn=fake_query, bot_name="Ricky",
-                   persona="You are Ricky, loud and crude, roasts everyone.")
-    await r.run("x", "Max", [])
-    assert "Write it AS Ricky" in seen["system"] and "loud and crude, roasts everyone" in seen["system"]
-    assert "facts must stay exactly right" in seen["system"]
-    r = TaskRunner("k", "m", str(tmp_path / "u"), query_fn=fake_query)
-    await r.run("x", "Max", [])
-    assert "Write it AS" not in seen["system"]
+    assert "ONLY the information" in OPERATOR_PROMPT and "no greeting" in OPERATOR_PROMPT
+    assert "Write it AS" not in OPERATOR_PROMPT
 
 
-async def test_task_result_is_sent_unchanged(tmp_path):
+def test_afterword_guard():
+    from imessage_agent.llm import afterword_ok
+
+    results = "Keens, 72 W 36th St, call 212-947-3636, open till 10:30pm. Nick + Stef's closes 9pm."
+    assert afterword_ok(results, "keens or bust, dan you're paying")
+    assert afterword_ok(results, "nick + stef's closes at 9, so don't be late like always")
+    assert not afterword_ok(results, "call em at 212-555-0000")  # number not in the results
+    assert not afterword_ok(results, "book at keens.com")  # link
+    assert not afterword_ok(results, "x" * 300)  # too long
+    assert not afterword_ok(results, "")
+
+
+async def _three_texts(model_says, tmp_path):
     from imessage_agent.context import ContextStore
     from tests.conftest import FakeBB, make_settings
 
+    class LLM:
+        name = "fake"
+
+        async def reply(self, system, messages):
+            return model_says if "research guy just posted" in system else "on it, chief"
+
     s = make_settings(voice_acks=True, task_chat_guids=[ALLOWED])
     bb = FakeBB()
-    llm = FakeLLM("on it, chief")
-    text = "keens on 36th, 212-947-3636, open till 10:30. don't wear the fedora, dan"
-    agent = Agent(s, bb, llm, ContextStore(10, 3600), images=None,
+    facts = "Keens, 72 W 36th St, call 212-947-3636, open till 10:30pm."
+    agent = Agent(s, bb, LLM(), ContextStore(10, 3600), images=None,
                   resolver=SenderResolver(None, {"+15550001111": "Max"}, use_contacts=False),
-                  tasks=FakeRunner(TaskResult(True, text=text)))  # type: ignore[arg-type]
-    await agent.process(message("/task steak", guid="z1"))
+                  tasks=FakeRunner(TaskResult(True, text=facts)))  # type: ignore[arg-type]
+    await agent.process(message("/task steak near msg", guid="a" + str(abs(hash(model_says)))))
     await agent._task_job
-    assert bb.texts[-1][1] == text
+    return [t for _, t in bb.texts], facts
+
+
+async def test_task_sends_ack_facts_then_afterword(tmp_path):
+    texts, facts = await _three_texts("keens. obviously. max you're buying", tmp_path)
+    assert texts == ["on it, chief", facts, "keens. obviously. max you're buying"]
+
+
+async def test_afterword_skipped_when_it_restates_numbers(tmp_path):
+    texts, facts = await _three_texts("call keens at 212-555-1234 lol", tmp_path)
+    assert texts == ["on it, chief", facts]
 

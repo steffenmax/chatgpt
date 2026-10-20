@@ -21,8 +21,10 @@ from .llm import (
     INTENT_SCHEMA,
     INTENT_SYSTEM,
     LOOKUP_NOTICES,
+    AFTERWORD_SUFFIX,
     REACTION_ADDENDUM,
     SELF_ONLY_RULE,
+    afterword_ok,
     VOICE_SYSTEM_SUFFIX,
     Intent,
     TextBackend,
@@ -492,18 +494,43 @@ class Agent:
             return
         text = res.text if len(res.text) <= 1500 else res.text[:1500].rsplit(" ", 1)[0] + " …"
         await self._deliver(chat_guid, text)
-        self.context.add(chat_guid, self.s.bot_name, f"[finished a task for {who}: {text[:600]}]", from_bot=True)
+        self.context.add(chat_guid, self.s.bot_name, f"[posted task results for {who}: {text[:600]}]", from_bot=True)
         for f in res.files[:3]:
             try:
                 await self.bb.send_attachment(chat_guid, f, name=f.name)
             except Exception as exc:  # noqa: BLE001
                 log_event("task.attach_failed", chat_guid=chat_guid, error=exc_name(exc))
+        await self._afterword(chat_guid, who, request, text)
 
     async def _deliver(self, chat_guid: str, text: str) -> None:
-        """Task results arrive already written in the bot's voice by the task agent (see
-        TaskRunner voice). The local model doesn't rewrite them: in testing it dropped or
-        invented details in most attempts, and these carry phone numbers, times and prices."""
+        """Task results go out verbatim: the facts, with no assistant framing (the agent is told
+        to write it that way). The bot's own voice comes before (the ack) and after (_afterword)."""
         await self._say(chat_guid, text, remember=False)
+
+    async def _afterword(self, chat_guid: str, who: str, request: str, results: str) -> None:
+        """One short closing text in the bot's voice reacting to the results. Skipped if it
+        restates numbers or links (it could garble them), runs long, or reads off."""
+        if not self.s.voice_acks:
+            return
+        history = self.context.get(chat_guid)
+        names = speaker_names(history, self.s.bot_name)
+        system = (self._system_for(chat_guid) + AFTERWORD_SUFFIX
+                  .replace("{who}", who).replace("{request}", request[:200].replace('"', "'")))
+        for attempt in (1, 2):
+            try:
+                async with self._llm_gate:
+                    raw = await self.llm.reply(system, [{"role": "user", "content": results}])
+            except Exception as exc:  # noqa: BLE001
+                log_event("voice.failed", chat_guid=chat_guid, error=exc_name(exc))
+                return
+            text, impersonated = fix_speaker(clean_reply(raw, self.s.bot_name), names, self.s.bot_name)
+            low = text.lower()
+            if (not impersonated and afterword_ok(results, text) and not _ECHOED_INSTRUCTION.search(low)
+                    and not (_REFUSAL.search(low) and not _REFUSAL.search(results.lower()))):
+                await self._say(chat_guid, text)
+                log_event("task.afterword", chat_guid=chat_guid, chars=len(text), attempt=attempt)
+                return
+        log_event("task.afterword", chat_guid=chat_guid, status="skipped")
 
     def _task_asker(self, chat_guid: str, requester: str | None = None):
         async def ask(question: str) -> str | None:

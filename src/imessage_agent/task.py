@@ -49,24 +49,14 @@ OPERATOR_PROMPT = (
     "If you have the ask_chat tool and a detail you truly need is missing (date, time, party size, "
     "budget, which option), ask one short question. Never ask for passwords, logins, codes or "
     "payment details; those are always the person's job.\n"
-    "Your final answer is texted to the group as-is: plain text, no markdown headings, tables or "
-    "bold, short paragraphs or simple dashes, under 900 characters. Include at most 3 links, and "
-    "only ones you actually opened. If you wrote a longer document, say its filename in one line; "
-    "it will be attached."
+    "Your final answer is posted in the group chat right after a friend says he's on it, and he'll "
+    "add his own comment after it, so give ONLY the information: start directly with the answer, no "
+    "greeting, no name, no 'I found', 'I checked' or 'here's', nothing about yourself or your tools, "
+    "no offers or sign-off. If something couldn't be checked, state that as a plain fact. Plain text, "
+    "no markdown headings, tables or bold; short lines or simple dashes; under 900 characters. At "
+    "most 3 links, only ones you actually opened. If you wrote a longer document, add one line with "
+    "its filename; it will be attached."
 )
-
-VOICE_GUIDE = (
-    "\n\nThe final answer is posted by {bot_name}, the group's friend in the chat, as his own message. "
-    "Write it AS {bot_name}, first person, in his voice: his attitude, humor, slang and the way he talks "
-    "to these people. Here is how {bot_name} is described:\n<<<\n{persona}\n>>>\n"
-    "Answer what they actually asked in plain terms (a yes/no gets a yes or no), then let him be "
-    "himself: a joke, a jab at whoever asked, or a bit of attitude is expected, not optional. "
-    "Use that for tone and delivery only. The facts must stay exactly right: every name, address, time, "
-    "price, phone number and link precise and complete, nothing invented. Don't mention being an "
-    "assistant, a model or 'research tools'; if something couldn't be checked, say so in his words. "
-    "Your questions via ask_chat can be in his voice too."
-)
-
 
 @dataclass
 class TaskResult:
@@ -137,8 +127,6 @@ class TaskRunner:
         browser: bool = False,
         max_questions: int = 2,
         ask_timeout: float = 240.0,
-        bot_name: str = "",
-        persona: str = "",
     ):
         self.api_key = api_key
         self.model = model
@@ -150,10 +138,7 @@ class TaskRunner:
         self.use_browser = browser
         self.max_questions = max_questions
         self.ask_timeout = ask_timeout
-        self.system_prompt = OPERATOR_PROMPT + (
-            VOICE_GUIDE.replace("{bot_name}", bot_name).replace("{persona}", persona.strip()[:4000])
-            if bot_name and persona.strip() else ""
-        )
+        self.system_prompt = OPERATOR_PROMPT
 
     def _prepare(self) -> Path:
         self.root.mkdir(parents=True, exist_ok=True)

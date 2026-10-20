@@ -281,6 +281,28 @@ def strip_unseen_urls(reply: str, seen_text: str) -> str:
     return re.sub(r"[ \t]{2,}", " ", out).strip()
 
 
+AFTERWORD_SUFFIX = (
+    "\n\nYour research guy just posted the results below in the chat, for {who}, who asked: \"{request}\". "
+    "Now send ONE short text of your own reacting to it, in your voice: your pick, an opinion, what "
+    "you'd do, or a jab at whoever asked. Don't repeat the details, numbers, times or links; they're "
+    "right above. One or two sentences, no name prefix, no quotes, no markdown."
+)
+
+_LINKISH = re.compile(r"https?://|www\.|\.(com|net|org|io)\b", re.IGNORECASE)
+
+
+def afterword_ok(results: str, text: str) -> bool:
+    """A closing comment may react to the results but must not restate (and garble) them."""
+    t = (text or "").strip()
+    if not t or len(t) > 260 or t.count("\n") > 1 or _LINKISH.search(t):
+        return False
+    have = set(_NUM.findall(results)) if results else set()
+    return all(n in have for n in _NUM.findall(t))
+
+
+_NUM = re.compile(r"\d+(?:[:.,]\d+)*")
+
+
 def clean_reply(text: str, bot_name: str) -> str:
     text = _THINK_RE.sub("", text).strip()
     # Some models echo a "Name:" prefix the way the history is formatted.
