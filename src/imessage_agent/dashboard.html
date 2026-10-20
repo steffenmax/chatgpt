@@ -48,7 +48,8 @@
     <div class="actions"><button class="primary" id="memsave">Save</button><button class="ghost" id="memreload">Reload</button><span class="note" id="mempath"></span></div></section>
   <section class="wide" id="briefsec" hidden><h2>Culture brief <span class="note" id="briefmeta"></span></h2>
     <textarea id="brieftext" spellcheck="false" style="min-height:220px"></textarea>
-    <div class="actions"><button class="primary" id="briefsave">Save</button><button class="ghost" id="briefrefresh">Refresh now</button><span class="note" id="briefnote"></span></div></section>
+    <div class="actions"><button class="primary" id="briefsave">Save</button><button class="ghost" id="briefrefresh">Refresh now</button><span class="note" id="briefnote"></span></div>
+    <div id="xqsec" hidden><h2 style="margin-top:18px">X searches <span class="note" id="xqmeta" style="text-transform:none;letter-spacing:0"></span></h2><div id="xq"></div></div></section>
   <section class="wide"><h2>Reminders</h2><div id="reminders"></div></section>
   <section class="wide"><h2>Live events <span class="note">(what the log records: event names, timings, counts; never message text)</span></h2>
     <div class="counters" id="counters"></div>
@@ -127,6 +128,27 @@ async function loadBrief(force) {
   const x = d.x ? `, X: ${d.x.queries} queries × ${d.x.posts_per_query} posts ≈ $${d.x.est_usd_per_refresh.toFixed(2)} per refresh, est. $${Number(d.x.spent_usd).toFixed(2)} spent since ${d.x.spent_since ? d.x.spent_since.slice(0, 10) : "never"}` : "";
   $("briefmeta").textContent = `(${age}, daily at ${d.at}, source: ${src}${x}${d.in_prompt ? ", in Ricky's prompt" : ", not in prompt: missing or older than 3 days"}${d.refreshing ? ", refreshing…" : ""}${d.last_error ? ", last attempt failed: " + d.last_error : ""})`;
   if (force || !briefDirty) { $("brieftext").value = d.text; briefDirty = false; }
+  renderXQ(d.x);
+}
+function renderXQ(x) {
+  $("xqsec").hidden = !x; if (!x) return;
+  const origin = {X_QUERIES: "from X_QUERIES", BRIEF_TOPICS: "from BRIEF_TOPICS (X_QUERIES is empty)", defaults: "built-in defaults (X_QUERIES and BRIEF_TOPICS are empty)"}[x.origin] || "";
+  const last = x.last;
+  const lastTxt = last ? `last pull ${last.at.replace("T", " ").slice(0, 16)}: ${last.posts} posts, $${Number(last.usd).toFixed(2)}${last.queries_failed ? `, ${last.queries_failed} failed` : ""}` : "not pulled yet";
+  $("xqmeta").textContent = `(${origin} · filters: ${x.filters} · last ${x.lookback_hours}h · ${lastTxt})`;
+  const byQuery = {}; (last && last.per_query || []).forEach(r => byQuery[r.query] = r);
+  const cell = (r) => {
+    if (!r) return '<span class="note">not pulled yet</span>';
+    if (r.status !== "ok") return pill(false, "", esc(r.status), "bad");
+    if (!r.posts) return pill(false, "", "0 posts", "warn");
+    return `${pill(true, `${r.posts} posts`, "", "ok")} <span class="note">${r.kept} used</span>`;
+  };
+  const rows = x.plan.map(q => `<tr><td><code>${esc(q.query)}</code></td><td>${q.posts}</td><td>${cell(byQuery[q.query])}</td></tr>`);
+  const dropped = (x.dropped || []).map(q => `<tr><td><code>${esc(q)}</code></td><td>0</td><td>${pill(false, "", "over the $ cap", "warn")}</td></tr>`);
+  $("xq").innerHTML = (rows.length || dropped.length)
+    ? `<table><tr><th>Search</th><th>Asks for</th><th>Last pull</th></tr>${rows.join("")}${dropped.join("")}</table>`
+      + `<p class="note">≈ $${x.est_usd_per_refresh.toFixed(2)} per refresh. Edit X_QUERIES in .env, then restart the bot; new searches show here as "not pulled yet" until the next refresh.</p>`
+    : '<span class="note">no searches configured</span>';
 }
 $("brieftext").addEventListener("input", () => briefDirty = true);
 $("briefsave").onclick = async () => { const r = await fetch("/dashboard/api/brief", {method:"PUT", headers:{"content-type":"application/json"}, body: JSON.stringify({text: $("brieftext").value})}); if (r.ok) { briefDirty = false; $("briefnote").textContent = "saved " + new Date().toLocaleTimeString(); loadBrief(true); } };

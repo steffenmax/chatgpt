@@ -142,6 +142,8 @@ class PullResult:
     cost_usd: float = 0.0
     errors: list[str] = field(default_factory=list)
     duration_ms: int = 0
+    # one entry per planned search: the query and counts only, never post text
+    per_query: list[dict[str, Any]] = field(default_factory=list)
 
 
 class XSearch:
@@ -158,8 +160,10 @@ class XSearch:
         transport: httpx.AsyncBaseTransport | None = None,
         clock=time.time,
         filters: str = FILTERS,
+        origin: str = "",
     ):
         self.queries = [q for q in queries if q.strip()][:MAX_QUERIES]
+        self.origin = origin  # where the queries came from (X_QUERIES, BRIEF_TOPICS, defaults), for the dashboard
         self.filters = filters.strip() or FILTERS
         self.posts_per_query = max(MIN_RESULTS, min(MAX_RESULTS, posts_per_query))
         self.lookback_hours = lookback_hours
@@ -209,7 +213,8 @@ class XSearch:
         d["posts"] = int(d.get("posts") or 0) + res.posts
         d["usd"] = round(float(d.get("usd") or 0) + res.cost_usd, 4)
         d["last"] = {"at": now, "posts": res.posts, "usd": round(res.cost_usd, 4),
-                     "queries_ok": res.queries_ok, "queries_failed": res.queries_failed}
+                     "queries_ok": res.queries_ok, "queries_failed": res.queries_failed,
+                     "per_query": res.per_query}
         try:
             self.ledger_path.parent.mkdir(parents=True, exist_ok=True)
             fd, tmp = tempfile.mkstemp(prefix=".x-spend-", suffix=".json", dir=self.ledger_path.parent)
@@ -222,7 +227,14 @@ class XSearch:
 
     def status(self) -> dict[str, Any]:
         led = self.ledger()
+        plan = self.plan()
+        planned = {q for q, _ in plan}
         return {
+            "origin": self.origin,
+            "filters": self.filters,
+            "lookback_hours": self.lookback_hours,
+            "plan": [{"query": q, "full": full_query(q, self.filters), "posts": n} for q, n in plan],
+            "dropped": [q for q in self.queries if q not in planned],  # over the per-refresh cap
             "queries": len(self.plan()),
             "queries_configured": len(self.queries),
             "posts_per_query": self.plan()[0][1] if self.plan() else 0,
@@ -239,7 +251,10 @@ class XSearch:
         res = PullResult()
         start_time = (datetime.now(timezone.utc) - timedelta(hours=self.lookback_hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
         sections: list[str] = []
-        for query, n in self.plan():
+        plan = self.plan()
+        for i, (query, n) in enumerate(plan):
+            row: dict[str, Any] = {"query": query, "requested": n, "posts": 0, "kept": 0, "status": "ok"}
+            res.per_query.append(row)
             params = {
                 "query": full_query(query, self.filters),
                 "max_results": n,
@@ -252,14 +267,18 @@ class XSearch:
             except httpx.HTTPError as exc:
                 res.queries_failed += 1
                 res.errors.append(exc_name(exc))
+                row["status"] = exc_name(exc)
                 log_event("x.query_failed", error=exc_name(exc))
                 continue
             if r.status_code != 200:
                 res.queries_failed += 1
                 reason = f"http_{r.status_code}"
                 res.errors.append(reason)
+                row["status"] = reason
                 log_event("x.query_failed", status=r.status_code)
                 if r.status_code in (401, 402, 403, 429):
+                    for q, m in plan[i + 1:]:
+                        res.per_query.append({"query": q, "requested": m, "posts": 0, "kept": 0, "status": "skipped"})
                     break  # bad token, no credits, no access, rate limited: don't keep trying
                 continue
             try:
@@ -267,11 +286,13 @@ class XSearch:
             except ValueError:
                 res.queries_failed += 1
                 res.errors.append("bad_json")
+                row["status"] = "bad_json"
                 continue
             res.queries_ok += 1
             res.posts += len(posts)
             res.cost_usd += len(posts) * POST_READ_USD
             ranked = rank(posts)
+            row["posts"], row["kept"] = len(posts), len(ranked)
             if ranked:
                 lines = [f"## {query}"]
                 for p in ranked:

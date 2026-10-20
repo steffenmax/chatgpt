@@ -204,3 +204,30 @@ def test_build_brief_wires_the_source(monkeypatch, tmp_path):
     assert b.source == "both" and b.runner is not None and b.writer is None and b.x.plan() == [("Jets", 30), ("Knicks", 30)]
     b = build_brief(make_settings(brief_enabled=True, brief_file=path, anthropic_api_key="k", brief_source="web"))
     assert b.source == "web" and b.x is None
+
+
+async def test_per_search_results_reach_the_ledger_and_status(tmp_path):
+    pages = {"NBA": [post(1, "Knicks in 5", likes=12000), post(2, "Knicks in 5", likes=3)]}
+    x = XSearch("tok", ["NBA", "empty", "c", "d"], posts_per_query=10, max_usd_per_refresh=0.15, origin="X_QUERIES",
+                ledger_path=str(tmp_path / "x-spend.json"), transport=fake_api(pages))
+    st = x.status()
+    assert st["origin"] == "X_QUERIES" and [p["query"] for p in st["plan"]] == ["NBA", "empty", "c"]
+    assert st["dropped"] == ["d"] and st["plan"][0]["full"] == "NBA lang:en -is:retweet -is:reply" and st["last"] is None
+    await x.pull()
+    rows = x.status()["last"]["per_query"]
+    assert rows[0] == {"query": "NBA", "requested": 10, "posts": 2, "kept": 1, "status": "ok"}
+    assert rows[1]["posts"] == 0 and rows[1]["status"] == "ok"
+    assert "Knicks" not in json.dumps(x.ledger())  # counts only, never post text
+    await x.aclose()
+    bad = XSearch("bad", ["a", "b", "c"], transport=fake_api(status=402))
+    await bad.pull()
+    assert [r["status"] for r in bad.last.per_query] == ["http_402", "skipped", "skipped"]
+    await bad.aclose()
+
+
+def test_x_query_origin():
+    from tests.conftest import make_settings
+
+    assert make_settings(x_queries="from:a OR from:b; NBA").x_query_origin == "X_QUERIES"
+    assert make_settings(x_queries=" ", brief_topics="nfl").x_query_origin == "BRIEF_TOPICS"
+    assert make_settings().x_query_origin == "defaults"

@@ -240,6 +240,14 @@ class Settings(BaseSettings):
 
         return parse_queries(self.x_queries) or topics_to_queries(self.brief_topics)
 
+    @property
+    def x_query_origin(self) -> str:
+        from .xsearch import parse_queries
+
+        if parse_queries(self.x_queries):
+            return "X_QUERIES"
+        return "BRIEF_TOPICS" if self.brief_topics.strip() else "defaults"
+
     def outbound_hosts(self) -> list[tuple[str, str]]:
         """Every (purpose, host) the running app may open a connection to."""
         hosts = [
