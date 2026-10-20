@@ -54,3 +54,20 @@ async def test_dashboard_state_memory_reminders_and_events(tmp_path):
         assert any("event=trigger" in l for l in lines)
         joined = "\n".join(lines)
         assert "banana" not in joined and s.webhook_secret not in joined and s.bluebubbles_password not in joined
+
+
+def test_pulled_posts_endpoint(tmp_path):
+    from types import SimpleNamespace
+
+    s, bb, agent, mem, rem, app = _app(tmp_path)
+    with TestClient(app) as c:
+        assert c.get("/dashboard/api/brief/posts").status_code == 404  # brief off
+        agent.brief = SimpleNamespace(x=None)
+        assert c.get("/dashboard/api/brief/posts").status_code == 404  # brief without X
+        agent.brief = SimpleNamespace(x=SimpleNamespace(last_posts=lambda: {}))
+        assert c.get("/dashboard/api/brief/posts").json() == {"at": None, "searches": []}
+        saved = {"at": "2026-10-20T13:42:00", "searches": [{"query": "NBA", "returned": 1, "posts": [{"id": "1", "text": "x"}]}]}
+        agent.brief = SimpleNamespace(x=SimpleNamespace(last_posts=lambda: saved))
+        assert c.get("/dashboard/api/brief/posts").json() == saved
+        page = c.get("/dashboard").text
+        assert 'id="xpsec"' in page and "/dashboard/api/brief/posts" in page

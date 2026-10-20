@@ -231,3 +231,24 @@ def test_x_query_origin():
     assert make_settings(x_queries="from:a OR from:b; NBA").x_query_origin == "X_QUERIES"
     assert make_settings(x_queries=" ", brief_topics="nfl").x_query_origin == "BRIEF_TOPICS"
     assert make_settings().x_query_origin == "defaults"
+
+
+async def test_last_pull_posts_are_saved_privately_for_the_dashboard(tmp_path):
+    pages = {"NBA": [post(1, "Knicks in 5", likes=12000, rts=40), post(2, "Knicks in 5", likes=3)]}
+    path = tmp_path / "x-posts.json"
+    x = XSearch("tok", ["NBA", "empty"], posts_per_query=10, posts_path=str(path), transport=fake_api(pages),
+                clock=lambda: 1_700_000_000.0)
+    assert x.last_posts() == {}
+    await x.pull()
+    d = x.last_posts()
+    assert path.stat().st_mode & 0o777 == 0o600 and d["at"].startswith("2023-11-14")
+    nba = d["searches"][0]
+    assert nba["query"] == "NBA" and nba["returned"] == 2 and len(nba["posts"]) == 1  # the copy was dropped
+    assert nba["posts"][0]["text"] == "Knicks in 5" and nba["posts"][0]["likes"] == 12000 and nba["posts"][0]["reposts"] == 40
+    assert d["searches"][1] == {"query": "empty", "returned": 0, "posts": []}
+    await x.aclose()
+    # a pull where every search fails keeps the last good posts
+    bad = XSearch("bad", ["NBA"], posts_path=str(path), transport=fake_api(status=402))
+    await bad.pull()
+    assert bad.last_posts()["searches"][0]["posts"][0]["text"] == "Knicks in 5"
+    await bad.aclose()

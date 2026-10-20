@@ -82,6 +82,7 @@ def build_x(settings: Settings, brief_path: Path) -> XSearch | None:
         filters=settings.x_query_filters,
         origin=settings.x_query_origin,
         ledger_path=str(brief_path.parent / "x-spend.json"),
+        posts_path=str(brief_path.parent / "x-posts.json"),
         # the local model's context window is small; the cloud writer can take it all
         digest_max_chars=10000 if local_writer else 40000,
     )

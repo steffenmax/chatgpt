@@ -10,6 +10,8 @@ X_MAX_USD_PER_REFRESH (queries are thinned, then dropped, to fit). No author
 expansions are requested (user reads cost extra). A small ledger next to the brief
 file keeps a running estimate of what has been spent; the Developer Console is the
 truth. Nothing from the group chat is ever sent to X: queries come from config only.
+The last pull's posts are also saved (0600, replaced on every pull) for the owner's
+dashboard; they never go into logs.
 """
 
 from __future__ import annotations
@@ -161,9 +163,12 @@ class XSearch:
         clock=time.time,
         filters: str = FILTERS,
         origin: str = "",
+        posts_path: str | None = None,
     ):
         self.queries = [q for q in queries if q.strip()][:MAX_QUERIES]
         self.origin = origin  # where the queries came from (X_QUERIES, BRIEF_TOPICS, defaults), for the dashboard
+        # The last pull's posts (0600 JSON, replaced each pull) so the owner can see them in the dashboard.
+        self.posts_path = Path(posts_path).expanduser() if posts_path else None
         self.filters = filters.strip() or FILTERS
         self.posts_per_query = max(MIN_RESULTS, min(MAX_RESULTS, posts_per_query))
         self.lookback_hours = lookback_hours
@@ -225,6 +230,31 @@ class XSearch:
         except OSError as exc:
             log_event("x.ledger_failed", error=exc_name(exc))
 
+    def last_posts(self) -> dict[str, Any]:
+        """The posts from the last pull, as saved by _save_posts ({} if none)."""
+        if self.posts_path is None:
+            return {}
+        try:
+            d = json.loads(self.posts_path.read_text(encoding="utf-8"))
+            return d if isinstance(d, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _save_posts(self, pulled: list[dict[str, Any]]) -> None:
+        if self.posts_path is None:
+            return
+        doc = {"at": datetime.fromtimestamp(self._clock()).isoformat(timespec="seconds"),
+               "lookback_hours": self.lookback_hours, "searches": pulled}
+        try:
+            self.posts_path.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(prefix=".x-posts-", suffix=".json", dir=self.posts_path.parent)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(doc, f, ensure_ascii=False)
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, self.posts_path)
+        except OSError as exc:
+            log_event("x.posts_save_failed", error=exc_name(exc))
+
     def status(self) -> dict[str, Any]:
         led = self.ledger()
         plan = self.plan()
@@ -251,6 +281,7 @@ class XSearch:
         res = PullResult()
         start_time = (datetime.now(timezone.utc) - timedelta(hours=self.lookback_hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
         sections: list[str] = []
+        pulled: list[dict[str, Any]] = []
         plan = self.plan()
         for i, (query, n) in enumerate(plan):
             row: dict[str, Any] = {"query": query, "requested": n, "posts": 0, "kept": 0, "status": "ok"}
@@ -293,6 +324,13 @@ class XSearch:
             res.cost_usd += len(posts) * POST_READ_USD
             ranked = rank(posts)
             row["posts"], row["kept"] = len(posts), len(ranked)
+            pulled.append({"query": query, "returned": len(posts), "posts": [{
+                "id": str(p.get("id") or ""), "text": p["text"], "created_at": p.get("created_at"),
+                "likes": int((p.get("public_metrics") or {}).get("like_count") or 0),
+                "reposts": int((p.get("public_metrics") or {}).get("retweet_count") or 0),
+                "replies": int((p.get("public_metrics") or {}).get("reply_count") or 0),
+                "quotes": int((p.get("public_metrics") or {}).get("quote_count") or 0),
+            } for p in ranked]})
             if ranked:
                 lines = [f"## {query}"]
                 for p in ranked:
@@ -307,6 +345,8 @@ class XSearch:
         res.duration_ms = int((time.monotonic() - started) * 1000)
         self.last = res
         self._record(res)
+        if res.queries_ok:
+            self._save_posts(pulled)
         log_event("x.pulled", posts=res.posts, queries_ok=res.queries_ok, queries_failed=res.queries_failed,
                   cost_cents=round(res.cost_usd * 100, 1), duration_ms=res.duration_ms)
         return res

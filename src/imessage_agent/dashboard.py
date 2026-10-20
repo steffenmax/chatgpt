@@ -2,7 +2,7 @@
 
 Everything here reads the running process' own state. It is reachable only from
 this Mac (the server refuses non-loopback binds) and is off unless DASHBOARD_ENABLED.
-Memory notes and reminder text are shown because the owner asked to see them; the
+Memory notes, reminder text and the last X pull's posts are shown because the owner asked to see them; the
 event feed is the same redacted, content-free log the file gets.
 """
 
@@ -155,6 +155,14 @@ def build_router(settings: Settings) -> APIRouter:
                 "in_prompt": bool(ag.brief.load()), "topics": ag.brief.topics, "at": ag.brief.at,
                 "last_error": ag.brief.last_error, "refreshing": ag.brief._lock.locked(),
                 **ag.brief.status()}
+
+    @r.get("/api/brief/posts")
+    async def brief_posts(request: Request):
+        ag = request.app.state.agent
+        x = getattr(ag.brief, "x", None) if ag.brief is not None else None
+        if x is None:
+            raise HTTPException(status_code=404, detail="X pulls off")
+        return x.last_posts() or {"at": None, "searches": []}
 
     @r.put("/api/brief")
     async def put_brief(request: Request):

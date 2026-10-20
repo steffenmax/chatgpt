@@ -31,6 +31,9 @@
   .note { color:var(--muted); font-size:12px }
   table { width:100%; border-collapse:collapse; font-size:14px } td, th { text-align:left; padding:6px 4px; border-top:1px solid var(--line) } th { color:var(--muted); font-weight:600; font-size:12px; border-top:0 }
   pre.feed { margin:0; max-height:420px; overflow:auto; font:12px/1.5 var(--mono); background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:10px; white-space:pre-wrap; word-break:break-word }
+  details.xs { border-top:1px solid var(--line); padding:6px 0 } details.xs summary { cursor:pointer; font-size:14px; padding:4px 0 }
+  details.xs summary code { font-size:13px } .xpost { padding:8px 0 8px 14px; border-top:1px dashed var(--line); font-size:14px; overflow-wrap:anywhere }
+  .xpost .note a { color:inherit }
   input.filter { width:100%; padding:7px 10px; border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--ink); margin-bottom:8px }
   .counters { display:grid; grid-template-columns:repeat(auto-fit,minmax(110px,1fr)); gap:8px; margin-bottom:10px }
   .counter { background:var(--bg); border:1px solid var(--line); border-radius:10px; padding:8px 10px } .counter b { display:block; font-size:20px; font-weight:650 } .counter span { font-size:12px; color:var(--muted) }
@@ -50,6 +53,9 @@
     <textarea id="brieftext" spellcheck="false" style="min-height:220px"></textarea>
     <div class="actions"><button class="primary" id="briefsave">Save</button><button class="ghost" id="briefrefresh">Refresh now</button><span class="note" id="briefnote"></span></div>
     <div id="xqsec" hidden><h2 style="margin-top:18px">X searches <span class="note" id="xqmeta" style="text-transform:none;letter-spacing:0"></span></h2><div id="xq"></div></div></section>
+  <section class="wide" id="xpsec" hidden><h2>Pulled X posts <span class="note" id="xpmeta" style="text-transform:none;letter-spacing:0"></span></h2>
+    <input class="filter" id="xpfilter" placeholder="filter posts">
+    <div id="xposts"></div></section>
   <section class="wide"><h2>Reminders</h2><div id="reminders"></div></section>
   <section class="wide"><h2>Live events <span class="note">(what the log records: event names, timings, counts; never message text)</span></h2>
     <div class="counters" id="counters"></div>
@@ -130,8 +136,29 @@ async function loadBrief(force) {
   if (force || !briefDirty) { $("brieftext").value = d.text; briefDirty = false; }
   renderXQ(d.x);
 }
+let xpAt = undefined, xpData = null;
+const kfmt = (n) => n >= 1e6 ? (n / 1e6).toFixed(1).replace(".0", "") + "M" : n >= 1000 ? (n / 1000).toFixed(1).replace(".0", "") + "k" : String(n);
+const ago = (iso) => { if (!iso) return ""; const h = (Date.now() - new Date(iso)) / 36e5; return h < 1 ? Math.max(1, Math.round(h * 60)) + "m ago" : h < 48 ? Math.round(h) + "h ago" : Math.round(h / 24) + "d ago"; };
+async function loadXPosts(lastAt) {
+  if (lastAt === xpAt && xpData) return;
+  const r = await fetch("/dashboard/api/brief/posts"); if (!r.ok) { $("xpsec").hidden = true; return; }
+  xpData = await r.json(); xpAt = lastAt; $("xpsec").hidden = false; renderXPosts();
+}
+function renderXPosts() {
+  const d = xpData || {searches: []}, f = $("xpfilter").value.trim().toLowerCase();
+  const total = d.searches.reduce((n, s) => n + s.posts.length, 0);
+  $("xpmeta").textContent = d.at ? `(pulled ${d.at.replace("T", " ").slice(0, 16)} · ${total} posts the brief worked from, most engaged first)` : "(nothing pulled yet: hit Refresh now on the brief)";
+  $("xposts").innerHTML = d.searches.map(s => {
+    const posts = s.posts.filter(p => !f || p.text.toLowerCase().includes(f));
+    if (f && !posts.length) return "";
+    const items = posts.map(p => `<div class="xpost">${esc(p.text)}<div class="note">♥ ${kfmt(p.likes)} · reposts ${kfmt(p.reposts)} · replies ${kfmt(p.replies)} · ${ago(p.created_at)}${p.id ? ` · <a href="https://x.com/i/web/status/${encodeURIComponent(p.id)}" target="_blank" rel="noopener noreferrer">open</a>` : ""}</div></div>`).join("");
+    return `<details class="xs"${f ? " open" : ""}><summary><code>${esc(s.query)}</code> <span class="note">${posts.length} of ${s.returned} returned</span></summary>${items || '<div class="note xpost">no posts</div>'}</details>`;
+  }).join("") || '<span class="note">no posts</span>';
+}
+$("xpfilter").addEventListener("input", renderXPosts);
 function renderXQ(x) {
-  $("xqsec").hidden = !x; if (!x) return;
+  $("xqsec").hidden = !x; if (!x) { $("xpsec").hidden = true; return; }
+  loadXPosts(x.last ? x.last.at : null);
   const origin = {X_QUERIES: "from X_QUERIES", BRIEF_TOPICS: "from BRIEF_TOPICS (X_QUERIES is empty)", defaults: "built-in defaults (X_QUERIES and BRIEF_TOPICS are empty)"}[x.origin] || "";
   const last = x.last;
   const lastTxt = last ? `last pull ${last.at.replace("T", " ").slice(0, 16)}: ${last.posts} posts, $${Number(last.usd).toFixed(2)}${last.queries_failed ? `, ${last.queries_failed} failed` : ""}` : "not pulled yet";
