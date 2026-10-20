@@ -159,7 +159,7 @@ async def test_betting_in_the_chat(clock, tmp_path):
     assert bb.texts[-1][1] == "who? i don't have them on the board"
     await agent.on_games([game(state="post", as_=24, hs=10, completed=True)])
     msg = bb.texts[-1][1]
-    assert msg.startswith("💰 book settled:\n✅ Max +400 on the Giants → 1350\n❌ Max -50 on the Texans → 1350")
+    assert msg.startswith("💰 FINAL: Giants 24, Texans 10\n✅ Max +400 on the Giants → 1350\n❌ Max -50 on the Texans → 1350")
     assert msg.endswith("giants fans eating good tonight")
 
 
@@ -264,3 +264,68 @@ async def test_live_bet_uses_live_odds(clock, tmp_path, monkeypatch):
     monkeypatch.setattr(h, "live_odds", no_line)
     await agent.process(message("/bet 10 knicks", guid="lv4"))
     assert bb.texts[-1][1] == "no live line on that one right now"
+
+
+
+def test_halfway_and_late_game_rules():
+    from imessage_agent.sports import late_game, past_halfway
+
+    g = nba(state="in", hs=58, as_=52)
+    g.period, g.detail, g.clock = 2, "Halftime", "0:00"
+    assert past_halfway(g) and late_game(g) is None
+    g.period, g.clock, g.detail = 4, "4:30", "4:30 - 4th"
+    assert late_game(g) is None  # 6-point game: neither close nor a blowout
+    g.home.score = 55
+    assert late_game(g) == "close"
+    g.home.score, g.away.score = 120, 95
+    assert late_game(g) == "blowout"
+    g.clock = "6:00"
+    assert late_game(g) is None  # not late yet
+    h = nhl_jets()
+    h.state, h.period, h.detail = "in", 2, "End of 2nd"
+    assert past_halfway(h)
+    m = game()
+    m.league, m.state, m.period = "mlb", "in", 5
+    assert not past_halfway(m)
+    m.period = 6
+    assert past_halfway(m)
+
+
+async def test_bet_watch_posts_half_sweat_and_final_once(clock, tmp_path):
+    agent, bb, llm = _agent(clock, [nba()], tmp_path, llm_reply="max is sweating bullets")
+    await agent.process(message("coco 100 on the knicks", guid="w1"))
+    await agent.process(message("/bet 50 sixers", guid="w2", sender="+15550002222"))
+    n = len(bb.texts)
+    half = nba(state="in", hs=58, as_=52)
+    half.period, half.detail = 2, "Halftime"
+    agent.espn.games = [half]
+    await agent.on_games([])
+    await agent.on_games([])  # nothing repeats
+    assert len(bb.texts) == n + 1
+    msg = bb.texts[-1][1]
+    assert msg.startswith("📊 Halftime: Knicks 58, 76ers 52\nriding: Max 100 on the Knicks (to win 55); ")
+    assert msg.endswith("\nmax is sweating bullets")
+    late = nba(state="in", hs=101, as_=99)
+    late.period, late.clock, late.detail = 4, "1:12", "1:12 - 4th"
+    agent.espn.games = [late]
+    await agent.on_games([])
+    await agent.on_games([])
+    assert len(bb.texts) == n + 2 and bb.texts[-1][1].startswith("🚨 sweat alert, 1:12 - 4th: Knicks 101, 76ers 99")
+    agent.espn.games = [nba(state="post", hs=104, as_=99, completed=True)]
+    await agent.on_games([])
+    assert bb.texts[-1][1].startswith("💰 FINAL: Knicks 104, 76ers 99\n✅ Max +55 on the Knicks")
+    assert agent.bookie.book.get("watch") == {}  # cleaned up once settled
+
+
+async def test_blowout_and_muted_payout(clock, tmp_path):
+    agent, bb, llm = _agent(clock, [nba()], tmp_path)
+    await agent.process(message("coco 100 on the sixers", guid="x1"))
+    g = nba(state="in", hs=118, as_=90)
+    g.period, g.clock, g.detail = 4, "3:00", "3:00 - 4th"
+    agent.espn.games = [g]
+    await agent.on_games([])
+    assert bb.texts[-1][1].startswith("💀 blowout, 3:00 - 4th: Knicks 118, 76ers 90")
+    await agent.process(message("/mute 10m", guid="x2"))
+    agent.espn.games = [nba(state="post", hs=120, as_=92, completed=True)]
+    await agent.on_games([])
+    assert bb.texts[-1][1] == "💰 FINAL: Knicks 120, 76ers 92\n❌ Max -100 on the 76ers → 900"  # money still reported, no roast

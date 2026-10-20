@@ -59,7 +59,8 @@ from .logsafe import exc_name, log_event
 from .alerts import Alert
 from .bookie import Bookie, odds_line, parse_bet
 from .media import GifSearch, TweetFinder, clean_query, describe_tweet, gif_from_reaction
-from .sports import ESPN, LEAGUES, Game, TeamIndex, fmt_odds, league_hint, live_odds, too_late_to_bet
+from .sports import (ESPN, LEAGUES, Game, TeamIndex, fmt_odds, late_game, league_hint, live_odds, past_halfway,
+                     too_late_to_bet)
 from .memory import MemoryStore
 from .reminders import MAX_DAYS_AHEAD, Reminder, ReminderStore, describe, parse
 from .task import TaskRunner
@@ -1272,14 +1273,53 @@ class Agent:
                     extra += await self.espn.scoreboard(league=league, date=what[1:])  # type: ignore[union-attr]
             except Exception as exc:  # noqa: BLE001
                 log_event("bookie.settle_fetch_failed", error=exc_name(exc))
-        for chat_guid, results in self.bookie.settle(games + extra).items():
-            lines = [("✅" if r.result == "won" else "❌" if r.result == "lost" else "➖")
-                     + f" {r.name} {'+' if r.delta > 0 else ''}{r.delta} on the {r.team} → {r.balance}" for r in results]
-            facts = "💰 book settled:\n" + "\n".join(lines)
-            comment = await self._sports_comment(chat_guid, facts, "Roast whoever lost the most and gas up whoever won "
-                                                 "the most, by name. One short line.")
-            await self._say(chat_guid, facts + (f"\n{comment}" if comment else ""))
+        everything = {g.key: g for g in games + extra}
+        await self._watch_bets(list(everything.values()))
+        for chat_guid, results in self.bookie.settle(list(everything.values())).items():
+            by_game: dict[str, list] = {}
+            for r in results:
+                by_game.setdefault(r.final, []).append(r)
+            blocks = []
+            for final, rs in by_game.items():
+                blocks.append(f"💰 FINAL: {final}\n" + "\n".join(
+                    ("✅" if r.result == "won" else "❌" if r.result == "lost" else "➖")
+                    + f" {r.name} {'+' if r.delta > 0 else ''}{r.delta} on the {r.team} → {r.balance}" for r in rs))
+            facts = "\n\n".join(blocks)
+            if self._muted(chat_guid):
+                await self._say(chat_guid, facts)  # money still gets reported, just no commentary
+            else:
+                comment = await self._sports_comment(chat_guid, facts, "Roast whoever lost the most and gas up whoever "
+                                                     "won the most, by name. One short line.")
+                await self._say(chat_guid, facts + (f"\n{comment}" if comment else ""))
             log_event("bookie.settled", chat_guid=chat_guid, count=len(results))
+
+    async def _watch_bets(self, games: list[Game]) -> None:
+        """Games people have money on: post at the half, and late if it's a sweat or a blowout."""
+        for g in games:
+            if g.state != "in":
+                continue
+            per_chat = self.bookie.bets_on(g.key)  # type: ignore[union-attr]
+            if not per_chat:
+                continue
+            late = late_game(g)
+            if late and self.bookie.mark(g.key, "late"):  # type: ignore[union-attr]
+                self.bookie.mark(g.key, "half")  # type: ignore[union-attr]
+                head = f"🚨 sweat alert, {g.detail}" if late == "close" else f"💀 blowout, {g.detail}"
+                how = ("It's coming down to the wire. Hype the sweat for everyone with money on it." if late == "close" else
+                       "It's over. Roast whoever's getting cooked, gloat for whoever's about to cash.")
+            elif past_halfway(g) and self.bookie.mark(g.key, "half"):  # type: ignore[union-attr]
+                head = f"📊 {g.detail if 'half' in g.detail.lower() else 'halfway, ' + g.detail}"
+                how = "Say how it's looking for each person with money on it, by name."
+            else:
+                continue
+            for chat_guid, bets in per_chat.items():
+                if chat_guid not in self._allowed or self._muted(chat_guid):
+                    continue
+                riding = "; ".join(f"{b['name']} {b['stake']} on the {b['team_name']} (to win {b['to_win']})" for b in bets)
+                facts = f"{head}: {g.score_line()}\nriding: {riding}"
+                comment = await self._sports_comment(chat_guid, facts, how)
+                await self._say(chat_guid, facts + (f"\n{comment}" if comment else ""))
+                log_event("bookie.watch", chat_guid=chat_guid, kind=late or "half")
 
     async def on_alert(self, alert: Alert) -> None:
         """A live NFL alert: the fact line, plus the bot's one-line reaction."""

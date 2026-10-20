@@ -308,6 +308,44 @@ async def live_odds(espn: "ESPN", g: Game) -> tuple[int, int] | None:
     return None
 
 
+# Margins that make a late game a sweat or a blowout, per league.
+CLOSE_MARGIN = {"nfl": 8, "cfb": 8, "nba": 5, "wnba": 5, "cbb": 5, "nhl": 1, "mlb": 2}
+BLOWOUT_MARGIN = {"nfl": 21, "cfb": 24, "nba": 20, "wnba": 18, "cbb": 20, "nhl": 4, "mlb": 6}
+
+
+def past_halfway(g: Game) -> bool:
+    """Halftime or later: the half in football/basketball, after two periods in hockey, after five innings."""
+    if g.state != "in":
+        return False
+    if g.league == "mlb":
+        return g.period >= 6
+    if g.league == "nhl":
+        d = g.detail.lower()
+        return g.period >= 3 or (g.period == 2 and ("end" in d or "int" in d))
+    halves = 1 if g.league == "cbb" else 2
+    return g.period > halves or "half" in g.detail.lower()
+
+
+def late_game(g: Game) -> str | None:
+    """'close' or 'blowout' once a game is in its last stretch (5 minutes left, or the 8th inning), else None."""
+    if g.state != "in":
+        return None
+    final = FINAL_PERIOD.get(g.league, 4)
+    if g.league == "mlb":
+        late = g.period >= 8
+    else:
+        secs = clock_seconds(g.clock)
+        late = g.period > final or (g.period == final and secs is not None and secs <= 300)
+    if not late:
+        return None
+    margin = abs(g.home.score - g.away.score)
+    if margin <= CLOSE_MARGIN.get(g.league, 5):
+        return "close"
+    if margin >= BLOWOUT_MARGIN.get(g.league, 20):
+        return "blowout"
+    return None
+
+
 def et_date(dt: datetime) -> str:
     """The ESPN 'dates=' value for a game (US Eastern calendar day)."""
     return dt.astimezone(ET).strftime("%Y%m%d")

@@ -38,6 +38,7 @@ def parse_bet(text: str, loose: bool = False) -> tuple[int | str, str] | None:
 
 @dataclass
 class Settled:
+    final: str  # "Knicks 112, 76ers 99"
     name: str
     team: str
     stake: int
@@ -168,10 +169,30 @@ class Bookie:
                     b["status"], delta = "lost", -b["stake"]
                     p["lost"] += 1
                 b["final"] = g.score_line()
-                out.setdefault(chat, []).append(Settled(p["name"], b["team_name"], b["stake"], b["status"], delta, p["bucks"]))
+                out.setdefault(chat, []).append(Settled(b["final"], p["name"], b["team_name"], b["stake"], b["status"], delta, p["bucks"]))
         if out:
+            open_keys = self.open_game_ids()
+            self.book["watch"] = {k: v for k, v in self.book.get("watch", {}).items() if k in open_keys}
             self._save()
         return out
+
+    def bets_on(self, game_key: str) -> dict[str, list[dict[str, Any]]]:
+        """Open bets on one game, per chat."""
+        out: dict[str, list[dict[str, Any]]] = {}
+        for chat, c in self.book.get("chats", {}).items():
+            for b in c["bets"]:
+                if b["status"] == "open" and b["game_id"] == game_key:
+                    out.setdefault(chat, []).append(b)
+        return out
+
+    def mark(self, game_key: str, what: str) -> bool:
+        """True the first time `what` (half, late) is marked for this game; kept across restarts."""
+        w = self.book.setdefault("watch", {}).setdefault(game_key, [])
+        if what in w:
+            return False
+        w.append(what)
+        self._save()
+        return True
 
     def bailout(self, chat: str, who: str, name: str) -> tuple[bool, int]:
         """(granted, balance). Only when broke (nothing left, nothing riding), once a week."""

@@ -133,7 +133,7 @@ class SportsAlerts:
                 text = (f"🏈 {KIND_LABEL.get(p.kind, p.kind)} {team.name if team else p.team}: {p.text.rstrip('. ')}. "
                         f"{g.score_line()} ({quarter(p.period)} {p.clock})")
                 out.append(Alert("score", text, g, scorer=p.team, fans=fans))
-        if not st["half"] and "half" in g.detail.lower():
+        if not st["half"] and "half" in g.detail.lower() and g.key not in self.watch_extra():  # bet watch posts its own
             st["half"] = True
             out.append(Alert("half", f"Halftime: {g.score_line()}.", g, scorer=self._leader(g), fans=fans))
         if g.state == "post" and not st["final"]:
