@@ -162,6 +162,8 @@ class Settings(BaseSettings):
     # this Mac to the linked site; X posts go through api.fxtwitter.com when LINK_X_REPLIES
     # is on (needed for replies), otherwise X's own embed endpoint (post only).
     links_enabled: bool = False
+    # A link nobody responds to for this long gets the bot's own take (0 = off).
+    link_quiet_seconds: float = Field(default=0.0, ge=0.0)
     link_x_replies: bool = True
     link_max_chars: int = Field(default=900, ge=200, le=3000)
 

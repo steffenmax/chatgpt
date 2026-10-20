@@ -7,6 +7,7 @@ Optional: Anthropic API, only when CLOUD_LLM_ENABLED=true. Text only, never imag
 from __future__ import annotations
 
 import json
+import random
 import re
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -46,14 +47,28 @@ LOOKUP_NOTICES = [
 ]
 
 
+# A fresh handful of examples each time, so the model doesn't anchor on one ('lmaooo').
+REACTION_EXAMPLES = (
+    "lmaooo", "💀", "wait what", "W", "massive L", "nahhh", "be so fr", "who asked", "respectfully no",
+    "this is huge", "say less", "cooked", "he's done", "screenshotted", "not again", "😭😭", "insane behavior",
+    "we been knew", "receipts?", "that's crazy bro", "fraud alert", "the audacity", "absolute cinema",
+    "seek help", "ok but why", "elite", "certified moment", "no shot", "tell me you didn't", "unreal",
+)
 REACTION_ADDENDUM = (
     "\n\nRight now you are NOT replying. You are only deciding whether the LAST message deserves a "
-    "quick reaction, the way a friend fires off 'lmaooo', '😂😂', 'wait what', '💀' or 'W'. The default "
-    "is NONE: plans, logistics, questions, money, 'ok', 'see you', and anything ordinary get NONE. React "
-    "when the message is funny, wild, a win or an L, a confession, a hot take, or begging to be roasted. "
-    "Answer with exactly the word NONE, or the reaction itself: at most 6 words or a few emoji, nothing "
-    "else, no quotes, no explanation."
+    "quick chime-in, the way a friend fires off a reaction or a one-liner, e.g. {examples}. The default "
+    "is NONE: plans, logistics, questions, money, 'ok', 'see you', and anything ordinary get NONE. Chime "
+    "in when the message is funny, wild, a win or an L, a confession, a hot take, or begging to be "
+    "roasted. Mix it up: a reaction, a short roast, or a quick take in your own voice, specific to what "
+    "they said, and never the same thing you said last time{last}. Answer with exactly the word NONE, or "
+    "the chime-in itself: at most 12 words, nothing else, no quotes, no explanation."
 )
+
+
+def reaction_addendum(last: str | None = None, rng=random) -> str:
+    examples = ", ".join(f"'{e}'" for e in rng.sample(REACTION_EXAMPLES, 6))
+    return REACTION_ADDENDUM.replace("{examples}", examples).replace("{last}", f" ('{last}')" if last else "")
+
 
 MEMORY_SYSTEM = (
     "You keep private notes for {bot_name} about one group chat so {bot_name} can talk to these people "
@@ -88,7 +103,9 @@ def memory_messages(current_notes: str, history: list[ContextMessage], bot_name:
 
 def parse_reaction(text: str) -> str | None:
     t = _THINK_RE.sub("", text or "").strip().strip('"').strip("'").strip()
-    if not t or t.upper().startswith("NONE") or "\n" in t or len(t) > 40:
+    if not t or t.upper().startswith("NONE") or "\n" in t or len(t) > 90 or len(t.split()) > 12:
+        return None
+    if re.match(r"^\s*\w+\s*:", t) or is_refusal(t):
         return None
     return t
 

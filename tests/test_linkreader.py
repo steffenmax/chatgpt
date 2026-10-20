@@ -160,3 +160,54 @@ async def test_links_off_by_default(agent_parts):
     assert agent.links is None and s.links_enabled is False
     await agent.process(message("https://x.com/a/status/1", guid="l3"))
     assert ctx.get(ALLOWED)[0].text == "https://x.com/a/status/1"
+
+
+class InstantLinks:
+    def __init__(self, card='[link: X post by A (@a): "the jets traded for a punter"]'):
+        self.card = card
+
+    async def read(self, url):
+        return self.card
+
+
+def _quiet_agent(clock, links, monkeypatch):
+    s = make_settings(link_quiet_seconds=90, reaction_chance=1.0, reaction_cooldown_seconds=0)
+    bb, llm = FakeBB(), FakeLLM("a punter?? jets gonna jets")
+    ctx = ContextStore(10, 3600, clock=clock)
+    agent = Agent(s, bb, llm, ctx, images=None, resolver=SenderResolver(None, {}, use_contacts=False), links=links)  # type: ignore[arg-type]
+    gate = asyncio.Event()
+    real_sleep = asyncio.sleep
+
+    async def sleep(sec):
+        if sec == 90:
+            await gate.wait()
+        else:
+            await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    return agent, bb, llm, gate
+
+
+async def test_unanswered_link_gets_a_take(clock, monkeypatch):
+    agent, bb, llm, gate = _quiet_agent(clock, InstantLinks(), monkeypatch)
+    assert await agent.process(message("https://x.com/a/status/1", guid="q1")) == "stored"
+    await asyncio.sleep(0)
+    assert bb.texts == []  # no instant reaction to a link
+    gate.set()
+    await agent.drain()
+    assert bb.texts == [(ALLOWED, "a punter?? jets gonna jets")]
+
+
+async def test_link_take_skipped_when_someone_replies_or_it_failed(clock, monkeypatch):
+    agent, bb, llm, gate = _quiet_agent(clock, InstantLinks(), monkeypatch)
+    agent.s.reaction_chance = 0
+    await agent.process(message("https://x.com/a/status/1", guid="q2"))
+    await agent.process(message("lol saw this", guid="q3"))
+    gate.set()
+    await agent.drain()
+    assert bb.texts == []
+    agent, bb, llm, gate = _quiet_agent(clock, InstantLinks("[link: couldn't open it]"), monkeypatch)
+    await agent.process(message("https://www.reddit.com/r/nfl/x", guid="q4"))
+    gate.set()
+    await agent.drain()
+    assert bb.texts == []

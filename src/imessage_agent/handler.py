@@ -23,7 +23,6 @@ from .llm import (
     INTENT_SYSTEM,
     LOOKUP_NOTICES,
     AFTERWORD_SUFFIX,
-    REACTION_ADDENDUM,
     REFUSAL_ROASTS,
     SELF_ONLY_RULE,
     afterword_ok,
@@ -38,6 +37,7 @@ from .llm import (
     looks_like_image_request,
     parse_intent,
     parse_reaction,
+    reaction_addendum,
     speaker_names,
     stop_sequences,
     strip_unseen_urls,
@@ -148,6 +148,7 @@ class Agent:
         # to one of them counts as talking to the bot.
         self._bot_guids: OrderedDict[str, None] = OrderedDict()
         self._last_reaction: dict[str, float] = {}
+        self._last_reaction_text: dict[str, str] = {}
         self._last_roast: dict[str, str] = {}
         self.context = context
         self.images = images
@@ -233,7 +234,7 @@ class Agent:
         address = (data.get("handle") or {}).get("address") if isinstance(data.get("handle"), dict) else None
         sender = await self.resolver.name_for(address)
 
-        stored = None
+        stored, has_link = None, False
         if trigger.kind in ("none", "mention"):
             stored = self.context.add(chat_guid, sender, text)
         elif trigger.kind == "ask":
@@ -241,10 +242,14 @@ class Agent:
         if stored is not None and self.links is not None:
             urls = find_urls(stored.text)
             if urls:
+                has_link = True
                 self._read_links(chat_guid, stored, urls)
         if trigger.kind in ("none", "mention", "ask"):
             self._maybe_update_memory(chat_guid)
         if trigger.kind == "none":
+            if has_link and self.s.link_quiet_seconds > 0:
+                self._spawn(self._quiet_link(chat_guid, stored))
+                return "stored"
             if not self._maybe_quiet_question(chat_guid, text):
                 self._maybe_react(chat_guid)
             return "stored"
@@ -307,10 +312,10 @@ class Agent:
             return
         await self._reply(chat_guid, history, use_cloud=(intent.action == "lookup"), reason="command" if force_cloud else "intent")
 
-    async def _reply(self, chat_guid: str, history, use_cloud: bool, reason: str) -> None:
+    async def _reply(self, chat_guid: str, history, use_cloud: bool, reason: str, nudge: str = "") -> None:
         messages = build_messages(self.s.persona, self.s.bot_name, history)
         backend = self.llm
-        system = self._system_for(chat_guid)
+        system = self._system_for(chat_guid) + nudge
         if use_cloud and self.cloud is not None:
             backend = self.cloud
             system = system + CLOUD_FACTS_ADDENDUM
@@ -665,12 +670,16 @@ class Agent:
             return
         try:
             async with self._llm_gate:
-                raw = await self.llm.reply(self._system_for(chat_guid) + REACTION_ADDENDUM,
+                last = self._last_reaction_text.get(chat_guid)
+                raw = await self.llm.reply(self._system_for(chat_guid) + reaction_addendum(last),
                                            build_messages(self.s.persona, self.s.bot_name, history))
             reaction = parse_reaction(raw)
+            if reaction and last and reaction.lower().rstrip("o!. ") == last.lower().rstrip("o!. "):
+                reaction = None  # same as last time
             if not reaction:
                 log_event("reaction.considered", chat_guid=chat_guid, status="none")
                 return
+            self._last_reaction_text[chat_guid] = reaction
             await self._say(chat_guid, reaction)
             log_event("reaction.sent", chat_guid=chat_guid, chars=len(reaction))
         except Exception as exc:  # noqa: BLE001
@@ -700,6 +709,24 @@ class Agent:
             await self._handle_mention(chat_guid)
         except Exception as exc:  # noqa: BLE001
             log_event("handler.error", chat_guid=chat_guid, kind="quiet_question", error=exc_name(exc))
+
+    async def _quiet_link(self, chat_guid: str, marker) -> None:
+        """A link nobody responds to gets the bot's own take after LINK_QUIET_SECONDS."""
+        await asyncio.sleep(self.s.link_quiet_seconds)
+        await self._links_ready(chat_guid)
+        history = self.context.get(chat_guid)
+        if not history or history[-1] is not marker:
+            return  # someone (or the bot) already said something
+        if "[link: " not in marker.text or "[link: couldn't open it]" in marker.text:
+            return  # nothing to talk about
+        log_event("trigger", chat_guid=chat_guid, kind="quiet_link")
+        try:
+            await self._reply(chat_guid, history, use_cloud=False, reason="quiet_link", nudge=(
+                f"\n\n{marker.sender} shared that link a while ago and nobody has said anything. Give your "
+                "own quick take on it, one or two short lines, like you just opened it: the funniest or "
+                "wildest part, a roast, or a reply that caught your eye. Don't ask if anyone saw it."))
+        except Exception as exc:  # noqa: BLE001
+            log_event("handler.error", chat_guid=chat_guid, kind="quiet_link", error=exc_name(exc))
 
     async def _handle_image(self, chat_guid: str, prompt: str) -> None:
         if not self.s.image_enabled or self.images is None:

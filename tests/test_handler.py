@@ -609,3 +609,21 @@ def test_refusal_detector_leaves_normal_lines_alone():
                 "That goes against my guidelines.", "I’m unable to assist with that request",
                 "I'm not comfortable writing that", "Is there anything else I can help with?"):
         assert is_refusal(bad), bad
+
+
+async def test_reaction_prompt_varies_and_repeats_are_dropped(clock):
+    import random as _r
+
+    from imessage_agent.llm import parse_reaction, reaction_addendum
+
+    a, b = reaction_addendum(None, _r.Random(1)), reaction_addendum("lmaooo", _r.Random(2))
+    assert a != b and "never the same thing you said last time ('lmaooo')" in b
+    assert parse_reaction("nah dan you did NOT just say that") == "nah dan you did NOT just say that"
+    assert parse_reaction("Alex: lol") is None and parse_reaction("I can't help with that") is None
+    agent, bb, llm = _reaction_agent(clock, "lmaooo")
+    await agent.process(message("dan fell off the boat", guid="v1"))
+    await agent.drain()
+    llm.reply_text = "LMAOOOOO"
+    await agent.process(message("then he fell again", guid="v2"))
+    await agent.drain()
+    assert bb.texts == [(ALLOWED, "lmaooo")]  # the near-identical second one was dropped
