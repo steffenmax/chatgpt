@@ -66,7 +66,7 @@ def _norm_addr(a: str | None) -> str:
     return a if "@" in a else re.sub(r"[^\d+]", "", a)
 _ECHOED_INSTRUCTION = re.compile(r"^\s*\w+\s*:|plain version|confirm that|let(ting)? the chat know|\bthey should\b")
 # A message without the name, right after the bot spoke, is judged only within this window.
-FOLLOWUP_WINDOW_SECONDS = 180
+FOLLOWUP_WINDOW_SECONDS = 30
 
 _REFUSAL = re.compile(r"\b(can'?t|cannot|can not|won'?t|unable|not able|yourself)\b")
 

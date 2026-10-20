@@ -744,7 +744,7 @@ async def test_followup_judgment_only_right_after_the_bot(agent_parts, monkeypat
     assert await agent.process(message("dan you up", guid="f0", replyToGuid="someone")) == "stored"
     assert llm.calls == []
     # too long after the bot spoke: not judged either
-    agent._bot_guids["bot-1"] -= 600
+    agent._bot_guids["bot-1"] -= 31
     assert await agent.process(message("ok", guid="f1", replyToGuid="bot-1")) == "stored"
     assert llm.calls == []
 
