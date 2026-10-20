@@ -186,6 +186,10 @@ The LaunchAgent starts at login, restarts on crash (`KeepAlive`), and logs to `~
 
 With `DASHBOARD_ENABLED=true`, open <http://127.0.0.1:8765/dashboard> (your `PORT`) on the bot Mac: BlueBubbles/Ollama status and which models are loaded, every outbound host marked local or REMOTE, the allowlisted chats and their members, the memory notes per chat (editable in place), pending reminders with cancel, and a live feed of the event log. It is served by the bot process on the loopback port, so nothing is exposed beyond this Mac.
 
+## Daily culture brief
+
+With `BRIEF_ENABLED=true`, every morning at `BRIEF_TIME` the task agent searches the web (generic prompt, no chat content) for what's trending and being joked about in `BRIEF_TOPICS`, and writes 10 to 15 one-line references. They're added to the bot's prompt for up to three days with an instruction to use them only when they fit. View, edit or refresh it from the dashboard. Costs a few cents a day.
+
 ## CLI
 
 | Command | Purpose |

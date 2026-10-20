@@ -131,6 +131,15 @@ class Settings(BaseSettings):
     anthropic_max_tokens: int = Field(default=400, ge=1)
     anthropic_timeout_seconds: float = Field(default=60.0, gt=0)
 
+    # --- daily culture brief (OFF by default) ---
+    # Once a day the task agent web-searches what people are joking about (no chat content
+    # is sent) and the brief is added to the bot's prompt. Needs ANTHROPIC_API_KEY.
+    brief_enabled: bool = False
+    brief_time: str = "08:00"
+    brief_topics: str = ""
+    brief_file: str = ""
+    brief_max_budget_usd: float = Field(default=0.5, gt=0, le=5)
+
     # --- dashboard (loopback only, same port as the webhook) ---
     # http://127.0.0.1:PORT/dashboard : health, what the bot can see and connect to,
     # memory notes (editable), reminders, live events. Off by default.
@@ -190,6 +199,8 @@ class Settings(BaseSettings):
             hosts.append(("Anthropic API (fact lookups)", "api.anthropic.com:443"))
         if self.image_enabled and self.image_backend == "openai":
             hosts.append(("OpenAI API (image generation)", "api.openai.com:443"))
+        if self.brief_enabled and not self.task_enabled:
+            hosts.append(("Anthropic API (daily brief)", "api.anthropic.com:443"))
         if self.task_enabled:
             hosts.append(("Anthropic API (/task agent)", "api.anthropic.com:443"))
             hosts.append(("Web pages fetched during /task", "any website:443"))
@@ -212,6 +223,8 @@ class Settings(BaseSettings):
             problems.append("CLOUD_LLM_ENABLED=true but ANTHROPIC_API_KEY is empty.")
         if self.cloud_facts_enabled and not self.anthropic_api_key:
             problems.append("CLOUD_FACTS_ENABLED=true but ANTHROPIC_API_KEY is empty.")
+        if self.brief_enabled and not self.anthropic_api_key:
+            problems.append("BRIEF_ENABLED=true but ANTHROPIC_API_KEY is empty.")
         if self.task_enabled and not self.anthropic_api_key:
             problems.append("TASK_ENABLED=true but ANTHROPIC_API_KEY is empty.")
         if self.task_enabled and not self.task_chat_guids:

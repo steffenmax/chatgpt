@@ -145,6 +145,39 @@ def build_router(settings: Settings) -> APIRouter:
         ok = ag.reminders.cancel(_chat_guid(index), rid)
         return JSONResponse({"ok": ok}, status_code=200 if ok else 404)
 
+    @r.get("/api/brief")
+    async def get_brief(request: Request):
+        ag = request.app.state.agent
+        if ag.brief is None:
+            raise HTTPException(status_code=404, detail="brief off")
+        age = ag.brief.age_hours()
+        return {"text": ag.brief.raw(), "age_hours": None if age is None else round(age, 1),
+                "in_prompt": bool(ag.brief.load()), "topics": ag.brief.topics, "at": ag.brief.at,
+                "last_error": ag.brief.last_error, "refreshing": ag.brief._lock.locked()}
+
+    @r.put("/api/brief")
+    async def put_brief(request: Request):
+        ag = request.app.state.agent
+        if ag.brief is None:
+            raise HTTPException(status_code=404, detail="brief off")
+        body = await request.json()
+        text = str(body.get("text", ""))[:6000]
+        ag.brief.save(text)
+        log_event("brief.edited", chars=len(text))
+        return {"ok": True}
+
+    @r.post("/api/brief/refresh")
+    async def refresh_brief(request: Request):
+        import asyncio
+
+        ag = request.app.state.agent
+        if ag.brief is None:
+            raise HTTPException(status_code=404, detail="brief off")
+        if ag.brief._lock.locked():
+            return {"ok": False, "detail": "already refreshing"}
+        asyncio.create_task(ag.brief.refresh())
+        return {"ok": True, "detail": "refreshing, takes a minute or two"}
+
     @r.get("/api/events")
     async def events(n: int = 200):
         return {"lines": recent_lines(max(1, min(n, 400)))}

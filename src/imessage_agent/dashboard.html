@@ -46,6 +46,9 @@
   <section><h2>Behaviour</h2><div id="features"></div></section>
   <section class="wide"><h2>Memory notes</h2><div class="tabs" id="memtabs"></div><textarea id="memtext" spellcheck="false"></textarea>
     <div class="actions"><button class="primary" id="memsave">Save</button><button class="ghost" id="memreload">Reload</button><span class="note" id="mempath"></span></div></section>
+  <section class="wide" id="briefsec" hidden><h2>Culture brief <span class="note" id="briefmeta"></span></h2>
+    <textarea id="brieftext" spellcheck="false" style="min-height:220px"></textarea>
+    <div class="actions"><button class="primary" id="briefsave">Save</button><button class="ghost" id="briefrefresh">Refresh now</button><span class="note" id="briefnote"></span></div></section>
   <section class="wide"><h2>Reminders</h2><div id="reminders"></div></section>
   <section class="wide"><h2>Live events <span class="note">(what the log records: event names, timings, counts; never message text)</span></h2>
     <div class="counters" id="counters"></div>
@@ -115,6 +118,18 @@ async function events() {
     if (/event=reaction\.sent/.test(l)) cnt.reaction++; if (/event=memory\.updated/.test(l)) cnt.memory++; if (/event=task\.finished/.test(l)) cnt.task++; if (/error=|\.failed/.test(l)) cnt.errors++; }
   $("counters").innerHTML = [["replies", cnt.trigger], ["cloud lookups", cnt.escalate], ["images sent", cnt.image], ["reactions", cnt.reaction], ["memory rewrites", cnt.memory], ["tasks", cnt.task], ["errors", cnt.errors]].map(([k, v]) => `<div class="counter"><b>${v}</b><span>${k} / last hour</span></div>`).join("");
 }
+let briefDirty = false;
+async function loadBrief(force) {
+  const r = await fetch("/dashboard/api/brief"); if (!r.ok) { $("briefsec").hidden = true; return; }
+  const d = await r.json(); $("briefsec").hidden = false;
+  const age = d.age_hours == null ? "never generated" : (d.age_hours < 1 ? "updated just now" : `updated ${Math.round(d.age_hours)}h ago`);
+  $("briefmeta").textContent = `(${age}, daily at ${d.at}${d.in_prompt ? ", in Ricky's prompt" : ", not in prompt: missing or older than 3 days"}${d.refreshing ? ", refreshing…" : ""}${d.last_error ? ", last attempt failed: " + d.last_error : ""})`;
+  if (force || !briefDirty) { $("brieftext").value = d.text; briefDirty = false; }
+}
+$("brieftext").addEventListener("input", () => briefDirty = true);
+$("briefsave").onclick = async () => { const r = await fetch("/dashboard/api/brief", {method:"PUT", headers:{"content-type":"application/json"}, body: JSON.stringify({text: $("brieftext").value})}); if (r.ok) { briefDirty = false; $("briefnote").textContent = "saved " + new Date().toLocaleTimeString(); loadBrief(true); } };
+$("briefrefresh").onclick = async () => { const r = await fetch("/dashboard/api/brief/refresh", {method:"POST"}); const d = await r.json(); $("briefnote").textContent = d.detail || ""; setTimeout(() => loadBrief(true), 1500); };
+loadBrief(true); setInterval(() => loadBrief(false), 15000);
 $("filter").addEventListener("input", events);
 refresh(); loadMemory(); events();
 setInterval(refresh, 5000); setInterval(events, 3000);

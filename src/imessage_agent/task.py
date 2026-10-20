@@ -127,6 +127,7 @@ class TaskRunner:
         browser: bool = False,
         max_questions: int = 2,
         ask_timeout: float = 240.0,
+        system_prompt: str | None = None,
     ):
         self.api_key = api_key
         self.model = model
@@ -138,7 +139,7 @@ class TaskRunner:
         self.use_browser = browser
         self.max_questions = max_questions
         self.ask_timeout = ask_timeout
-        self.system_prompt = OPERATOR_PROMPT
+        self.system_prompt = system_prompt or OPERATOR_PROMPT
 
     def _prepare(self) -> Path:
         self.root.mkdir(parents=True, exist_ok=True)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 import hmac
 import sys
 from contextlib import asynccontextmanager
@@ -15,6 +16,7 @@ from .bluebubbles import BlueBubblesClient
 from .config import Settings
 from .memory import MemoryStore
 from .reminders import ReminderStore
+from .brief import CultureBrief
 from .task import TaskRunner
 from .vision import OllamaVision
 from .context import ContextStore
@@ -60,6 +62,27 @@ def build_cloud(settings: Settings) -> TextBackend | None:
     )
 
 
+def build_brief(settings: Settings) -> CultureBrief | None:
+    if not (settings.brief_enabled and settings.anthropic_api_key):
+        return None
+    from .brief import BRIEF_PROMPT  # noqa: F401  (documented prompt lives with the module)
+
+    runner = TaskRunner(
+        api_key=settings.anthropic_api_key,
+        model=settings.task_model or settings.anthropic_model,
+        root=str(Path(settings.brief_file or "~/Library/Application Support/imessage-agent/brief.md").expanduser().parent / "brief-work"),
+        max_turns=20,
+        max_budget_usd=settings.brief_max_budget_usd,
+        timeout=600,
+        system_prompt=(
+            "You are a careful researcher. Use web search and web fetch. You cannot run commands or "
+            "contact anyone. Follow the task's output format exactly."
+        ),
+    )
+    return CultureBrief(settings.brief_file or "~/Library/Application Support/imessage-agent/brief.md",
+                        runner, topics=settings.brief_topics, at=settings.brief_time)
+
+
 def create_app(settings: Settings | None = None, agent: Agent | None = None) -> FastAPI:
     """Build the app. Tests pass a pre-built Agent with fake clients."""
     settings = settings or Settings()
@@ -88,6 +111,9 @@ def create_app(settings: Settings | None = None, agent: Agent | None = None) -> 
         ag: Agent = app.state.agent
         if ag.images is not None:
             ag.images.start()
+        brief_task = (
+            asyncio.create_task(ag.brief.run_forever(), name="brief") if getattr(ag, "brief", None) is not None else None
+        )
         reminder_task = (
             asyncio.create_task(ag.reminders.run(ag.fire_reminder), name="reminders")
             if ag.reminders is not None
@@ -106,6 +132,8 @@ def create_app(settings: Settings | None = None, agent: Agent | None = None) -> 
             sweeper.cancel()
             if reminder_task is not None:
                 reminder_task.cancel()
+            if brief_task is not None:
+                brief_task.cancel()
             if ag.images is not None:
                 await ag.images.stop()
             await ag.stop_task()
@@ -175,6 +203,7 @@ def create_app(settings: Settings | None = None, agent: Agent | None = None) -> 
             "reminders_enabled": ag.reminders is not None,
             "vision_enabled": ag.vision is not None,
             "task_enabled": ag.tasks is not None,
+            "brief_enabled": ag.brief is not None,
             "image_backend": settings.image_backend if ag.images else None,
             "image_queue": ag.images.qsize() if ag.images else None,
             "chats_with_context": ag.context.chat_count(),
@@ -269,6 +298,7 @@ def _build_agent(settings: Settings) -> Agent:
         )
         if settings.task_enabled and settings.anthropic_api_key
         else None,
+        brief=build_brief(settings),
     )
     agent_holder["a"] = agent
     return agent

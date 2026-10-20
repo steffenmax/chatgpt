@@ -116,6 +116,7 @@ class Agent:
         reminders: ReminderStore | None = None,
         vision=None,
         tasks: TaskRunner | None = None,
+        brief=None,
     ):
         self.s = settings
         self.bb = bb
@@ -129,6 +130,8 @@ class Agent:
         self.vision = vision
         # Optional /task agent (Claude Agent SDK); one job at a time, owner chats only.
         self.tasks = tasks
+        # Optional daily culture brief (CultureBrief), added to the prompt while fresh.
+        self.brief = brief
         self._task_job: asyncio.Task | None = None
         self._task_chat: str | None = None
         # A question the task agent asked: the next plain message in that chat answers it.
@@ -573,6 +576,13 @@ class Agent:
             system += (
                 "\n\nNotes you keep about this chat and the people in it, from earlier conversations "
                 "(use them naturally, never read them out):\n" + notes
+            )
+        brief = self.brief.load() if self.brief else ""
+        if brief:
+            system += (
+                "\n\nWhat people are talking and joking about online right now. Drop a reference when it "
+                "genuinely fits the conversation, like someone who's always online would; never force "
+                "one in, never explain the joke, never list these:\n" + brief
             )
         return system
 
