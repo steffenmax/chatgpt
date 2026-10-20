@@ -71,3 +71,38 @@ def test_pulled_posts_endpoint(tmp_path):
         assert c.get("/dashboard/api/brief/posts").json() == saved
         page = c.get("/dashboard").text
         assert 'id="xpsec"' in page and "/dashboard/api/brief/posts" in page
+
+
+def test_persona_panel_reads_and_saves(tmp_path, monkeypatch):
+    import dotenv
+
+    from imessage_agent import dashboard
+    from imessage_agent.main import create_app
+
+    monkeypatch.setattr(dashboard, "PERSONA_BACKUPS", tmp_path / "persona-backups")
+
+    s, bb, agent, mem, rem, _ = _app(tmp_path)
+    env = tmp_path / ".env"
+    env.write_text("BOT_NAME=Coco\nBOT_PERSONA=old persona text for {bot_name}\nPORT=1\n")
+    app = create_app(s, agent, env_path=env)
+    new = 'You are {bot_name}. He says "yo" a lot,\nit\'s his thing # not a comment'
+    before = agent.s.bot_persona
+    with TestClient(app) as c:
+        assert c.get("/dashboard/api/persona").json()["saves_to_env"] is True
+        assert c.put("/dashboard/api/persona", json={"persona": "short"}).status_code == 400
+        r = c.put("/dashboard/api/persona", json={"persona": new})
+        assert r.status_code == 200 and r.json()["saved_to_env"] is True
+        assert agent.s.persona == new.replace("{bot_name}", "Coco")  # live, no restart
+        assert dotenv.dotenv_values(env)["BOT_PERSONA"] == new and dotenv.dotenv_values(env)["PORT"] == "1"
+        assert c.get("/dashboard/api/persona").json()["persona"] == new
+        assert 'id="personatext"' in c.get("/dashboard").text
+    backups = list((tmp_path / "persona-backups").glob("persona-*.txt"))
+    assert len(backups) == 1 and backups[0].read_text() == before
+    assert backups[0].stat().st_mode & 0o777 == 0o600
+
+
+def test_persona_not_written_without_an_env_path(tmp_path):
+    s, bb, agent, mem, rem, app = _app(tmp_path)
+    with TestClient(app) as c:
+        r = c.put("/dashboard/api/persona", json={"persona": "You are {bot_name}, a test persona."})
+        assert r.json()["saved_to_env"] is False and agent.s.bot_persona == "You are {bot_name}, a test persona."

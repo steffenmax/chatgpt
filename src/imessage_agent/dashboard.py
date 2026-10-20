@@ -15,7 +15,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from .config import Settings, is_loopback_host
+from .config import Settings, is_loopback_host, set_env_value
 from .logsafe import exc_name, log_event, recent_lines
 
 _PAGE = Path(__file__).with_name("dashboard.html")
@@ -27,6 +27,25 @@ def _label(chat: dict | None, guid: str) -> str:
         return str(chat["displayName"]).strip()
     n = len((chat or {}).get("participants") or [])
     return "Direct chat" if guid.split(";")[1:2] == ["-"] else f"Group chat ({n + 1} people)"
+
+
+PERSONA_BACKUPS = Path("~/Library/Application Support/imessage-agent/persona-backups").expanduser()
+
+
+def _backup_persona(text: str, keep: int = 20) -> None:
+    """Keep the version being replaced (private, last `keep` versions)."""
+    import os
+
+    try:
+        PERSONA_BACKUPS.mkdir(parents=True, exist_ok=True)
+        os.chmod(PERSONA_BACKUPS, 0o700)
+        f = PERSONA_BACKUPS / time.strftime("persona-%Y%m%d-%H%M%S.txt")
+        f.write_text(text, encoding="utf-8")
+        os.chmod(f, 0o600)
+        for old in sorted(PERSONA_BACKUPS.glob("persona-*.txt"))[:-keep]:
+            old.unlink(missing_ok=True)
+    except OSError as exc:
+        log_event("persona.backup_failed", error=exc_name(exc))
 
 
 def build_router(settings: Settings) -> APIRouter:
@@ -144,6 +163,29 @@ def build_router(settings: Settings) -> APIRouter:
             raise HTTPException(status_code=404, detail="reminders off")
         ok = ag.reminders.cancel(_chat_guid(index), rid)
         return JSONResponse({"ok": ok}, status_code=200 if ok else 404)
+
+    @r.get("/api/persona")
+    async def get_persona(request: Request):
+        ag = request.app.state.agent
+        return {"persona": ag.s.bot_persona, "bot_name": ag.s.bot_name,
+                "saves_to_env": request.app.state.env_path is not None}
+
+    @r.put("/api/persona")
+    async def put_persona(request: Request):
+        ag = request.app.state.agent
+        body = await request.json()
+        text = str(body.get("persona", "")).strip()
+        if not 20 <= len(text) <= 8000:
+            raise HTTPException(status_code=400, detail="persona must be 20 to 8000 characters")
+        old = ag.s.bot_persona
+        env_path = request.app.state.env_path
+        if env_path is not None:
+            _backup_persona(old)
+            set_env_value(env_path, "BOT_PERSONA", text)
+        for s in {id(ag.s): ag.s, id(request.app.state.settings): request.app.state.settings}.values():
+            s.bot_persona = text  # takes effect on the next reply, no restart
+        log_event("persona.edited", chars=len(text))
+        return {"ok": True, "chars": len(text), "saved_to_env": env_path is not None}
 
     @r.get("/api/brief")
     async def get_brief(request: Request):

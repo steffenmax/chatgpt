@@ -143,9 +143,12 @@ def _build_brief_writer(settings: Settings) -> TextBackend:
     )
 
 
-def create_app(settings: Settings | None = None, agent: Agent | None = None) -> FastAPI:
+def create_app(settings: Settings | None = None, agent: Agent | None = None, env_path: Path | None = None) -> FastAPI:
     """Build the app. Tests pass a pre-built Agent with fake clients."""
-    settings = settings or Settings()
+    if settings is None:
+        settings = Settings()
+        # The dashboard's personality editor saves back to the .env the settings came from.
+        env_path = env_path or Path(str(settings.model_config.get("env_file") or ".env")).resolve()
     install_logging(
         settings.log_level,
         secrets=[settings.bluebubbles_password, settings.webhook_secret, settings.anthropic_api_key, settings.openai_api_key],
@@ -209,6 +212,7 @@ def create_app(settings: Settings | None = None, agent: Agent | None = None) -> 
 
     app = FastAPI(title="imessage-agent", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.state.settings = settings
+    app.state.env_path = env_path
 
     def _check_secret(secret_q: str | None, secret_h: str | None) -> None:
         provided = secret_q or secret_h or ""
@@ -379,7 +383,8 @@ def run() -> None:
     import uvicorn
 
     settings = Settings()
-    app = create_app(settings)
+    # The dashboard's personality editor saves back to the .env the settings came from.
+    app = create_app(settings, env_path=Path(str(settings.model_config.get("env_file") or ".env")).resolve())
     uvicorn.run(app, host=settings.host, port=settings.port, log_level="warning", access_log=False)
 
 

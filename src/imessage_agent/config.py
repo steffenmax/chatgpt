@@ -326,3 +326,39 @@ def _host_of(url: str) -> str:
 def is_loopback_host(hostport: str) -> bool:
     host = hostport.rsplit(":", 1)[0]
     return host in ("127.0.0.1", "localhost", "::1", "[::1]")
+
+
+def env_quote(value: str) -> str:
+    """A .env value that python-dotenv reads back exactly: double-quoted, with escapes."""
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("\r\n", "\n").replace("\n", "\\n") + '"'
+
+
+def set_env_value(path, key: str, value: str) -> None:
+    """Replace KEY=... in a .env file (or append it), atomically, keeping it private."""
+    import os
+    import re
+    import tempfile
+    from pathlib import Path
+
+    path = Path(path)
+    lines = path.read_text(encoding="utf-8").split("\n") if path.exists() else []
+    new = f"{key}={env_quote(value)}"
+    pat = re.compile(rf"^\s*(export\s+)?{re.escape(key)}\s*=", re.IGNORECASE)
+    for i, line in enumerate(lines):
+        if pat.match(line):
+            lines[i] = new
+            break
+    else:
+        lines.append(new)
+    fd, tmp = tempfile.mkstemp(prefix=".env-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise

@@ -47,6 +47,9 @@
   <section><h2>What it connects to</h2><div id="hosts"></div></section>
   <section><h2>What it can see</h2><div id="sees"></div></section>
   <section><h2>Behaviour</h2><div id="features"></div></section>
+  <section class="wide"><h2>Personality <span class="note" id="personameta" style="text-transform:none;letter-spacing:0"></span></h2>
+    <textarea id="personatext" spellcheck="true" style="min-height:200px"></textarea>
+    <div class="actions"><button class="primary" id="personasave">Save</button><button class="ghost" id="personareload">Reload</button><span class="note" id="personanote"></span></div></section>
   <section class="wide"><h2>Memory notes</h2><div class="tabs" id="memtabs"></div><textarea id="memtext" spellcheck="false"></textarea>
     <div class="actions"><button class="primary" id="memsave">Save</button><button class="ghost" id="memreload">Reload</button><span class="note" id="mempath"></span></div></section>
   <section class="wide" id="briefsec" hidden><h2>Culture brief <span class="note" id="briefmeta"></span></h2>
@@ -125,6 +128,23 @@ async function events() {
     if (/event=reaction\.sent/.test(l)) cnt.reaction++; if (/event=memory\.updated/.test(l)) cnt.memory++; if (/event=task\.finished/.test(l)) cnt.task++; if (/error=|\.failed/.test(l)) cnt.errors++; }
   $("counters").innerHTML = [["replies", cnt.trigger], ["cloud lookups", cnt.escalate], ["images sent", cnt.image], ["reactions", cnt.reaction], ["memory rewrites", cnt.memory], ["tasks", cnt.task], ["errors", cnt.errors]].map(([k, v]) => `<div class="counter"><b>${v}</b><span>${k} / last hour</span></div>`).join("");
 }
+let personaDirty = false;
+async function loadPersona(force) {
+  const r = await fetch("/dashboard/api/persona"); if (!r.ok) return;
+  const d = await r.json();
+  $("personameta").textContent = `({bot_name} becomes ${d.bot_name} · ${d.saves_to_env ? "saves to .env and is used from his next reply, the old version is backed up" : "not saved to .env in this mode"})`;
+  if (force || !personaDirty) { $("personatext").value = d.persona; personaDirty = false; countPersona(); }
+}
+const countPersona = () => { $("personanote").textContent = $("personatext").value.trim().length + " characters" + (personaDirty ? " · unsaved" : ""); };
+$("personatext").addEventListener("input", () => { personaDirty = true; countPersona(); });
+$("personareload").onclick = () => loadPersona(true);
+$("personasave").onclick = async () => {
+  const r = await fetch("/dashboard/api/persona", {method:"PUT", headers:{"content-type":"application/json"}, body: JSON.stringify({persona: $("personatext").value})});
+  const d = await r.json().catch(() => ({}));
+  if (r.ok) { personaDirty = false; countPersona(); $("personanote").textContent += " · saved " + new Date().toLocaleTimeString(); }
+  else { $("personanote").textContent = "not saved: " + (d.detail || r.status); }
+};
+loadPersona(true);
 let briefDirty = false;
 async function loadBrief(force) {
   const r = await fetch("/dashboard/api/brief"); if (!r.ok) { $("briefsec").hidden = true; return; }
