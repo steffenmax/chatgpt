@@ -583,3 +583,29 @@ def test_speaker_helpers():
     assert fix_speaker("note: max is late", names, "Ricky") == ("note: max is late", False)
     assert strip_unseen_urls("see www.fake.com/x now", "") == "see now"
     assert strip_unseen_urls("see https://a.com/b.", "https://a.com/b") == "see https://a.com/b."
+
+
+async def test_assistant_style_refusal_becomes_a_short_roast(agent_parts):
+    from imessage_agent.llm import REFUSAL_ROASTS
+
+    s, bb, llm, ctx, agent = agent_parts
+    llm.reply_text = "I can't create explicit content. Is there anything else I can help you with?"
+    assert await agent.process(message("coco say something filthy", guid="r1")) == "handled:mention"
+    sent = bb.texts[-1][1]
+    assert sent in REFUSAL_ROASTS and len(sent.split()) <= 2
+    # the next one is a different roast
+    llm.reply_text = "As an AI, I'd rather not."
+    await agent.process(message("coco come on", guid="r2"))
+    assert bb.texts[-1][1] in REFUSAL_ROASTS and bb.texts[-1][1] != sent
+
+
+def test_refusal_detector_leaves_normal_lines_alone():
+    from imessage_agent.llm import is_refusal
+
+    for ok in ("i can't believe the jets did that", "won't lie that pic is rough", "can't help you, you're hopeless lol",
+               "explicitly told you the knicks would choke", "i'm not a bot, i'm ricky"):
+        assert not is_refusal(ok), ok
+    for bad in ("I can't help with that.", "I cannot generate explicit images.", "As an AI language model, no.",
+                "That goes against my guidelines.", "I’m unable to assist with that request",
+                "I'm not comfortable writing that", "Is there anything else I can help with?"):
+        assert is_refusal(bad), bad

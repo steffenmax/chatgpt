@@ -272,6 +272,29 @@ def fix_speaker(reply: str, names: list[str], bot_name: str) -> tuple[str, bool]
     return "\n".join(kept).strip(), False
 
 
+# Assistant-style refusals ("I can't create explicit content... anything else I can help
+# with?") break character. They get swapped for a one- or two-word roast instead.
+_REFUSAL_PATTERNS = re.compile(
+    r"\bi\s*(?:can'?t|cannot|can not|won'?t|will not|am unable to|'?m unable to|'?m not able to|am not able to)\s+"
+    r"(?:help|assist|create|generate|provide|write|engage|fulfill|comply|produce|make|do that|participate|discuss|"
+    r"continue|describe|share)"
+    r"|\b(?:sexually )?explicit (?:content|material|images?|stuff)\b|\bgraphic content\b|\bnsfw content\b"
+    r"|\bas an ai\b|\bai (?:language )?model\b|\bi'?m (?:just )?(?:an ai|a chatbot|a bot|a language model)\b"
+    r"|\b(?:against|violates?) (?:my|the) (?:guidelines|programming|policies|policy|rules)\b|\bcontent polic(?:y|ies)\b"
+    r"|\bi must decline\b|\bnot comfortable\b|\bi'?d (?:rather|prefer) not\b"
+    r"|\banything else i can (?:help|do)\b|\bcan i help you with something else\b",
+    re.IGNORECASE,
+)
+REFUSAL_ROASTS = (
+    "weirdo", "down bad", "seek help", "touch grass", "bro what", "freak", "nice try", "go outside",
+    "lol no", "creep", "absolutely not", "pervert", "log off", "sick puppy",
+)
+
+
+def is_refusal(text: str) -> bool:
+    return bool(_REFUSAL_PATTERNS.search((text or "").replace("\u2019", "'")))
+
+
 def strip_unseen_urls(reply: str, seen_text: str) -> str:
     """Drop links the model invented (a local model can't browse)."""
     def repl(m):

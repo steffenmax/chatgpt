@@ -24,6 +24,7 @@ from .llm import (
     LOOKUP_NOTICES,
     AFTERWORD_SUFFIX,
     REACTION_ADDENDUM,
+    REFUSAL_ROASTS,
     SELF_ONLY_RULE,
     afterword_ok,
     VOICE_SYSTEM_SUFFIX,
@@ -33,6 +34,7 @@ from .llm import (
     clean_reply,
     fix_speaker,
     intent_messages,
+    is_refusal,
     looks_like_image_request,
     parse_intent,
     parse_reaction,
@@ -146,6 +148,7 @@ class Agent:
         # to one of them counts as talking to the bot.
         self._bot_guids: OrderedDict[str, None] = OrderedDict()
         self._last_reaction: dict[str, float] = {}
+        self._last_roast: dict[str, str] = {}
         self.context = context
         self.images = images
         self.resolver = resolver or SenderResolver(bb, settings.sender_names)
@@ -355,6 +358,12 @@ class Agent:
             duration_ms=int((time.monotonic() - started) * 1000),
             chars=len(reply),
         )
+        if is_refusal(reply):
+            # The model stepped out of character to decline: answer the way he would instead.
+            log_event("reply.refusal_swapped", chat_guid=chat_guid, backend=backend.name)
+            last = self._last_roast.get(chat_guid)
+            reply = random.choice([r for r in REFUSAL_ROASTS if r != last])
+            self._last_roast[chat_guid] = reply
         if not reply:
             reply = "hm, blanked. say that again?"
         await self._say(chat_guid, reply)
