@@ -266,6 +266,8 @@ def _build_agent(settings: Settings) -> Agent:
             browser=settings.task_browser,
             max_questions=settings.task_max_questions,
             ask_timeout=settings.task_ask_timeout_seconds,
+            bot_name=settings.bot_name,
+            persona=settings.persona,
         )
         if settings.task_enabled and settings.anthropic_api_key
         else None,

@@ -50,9 +50,21 @@ OPERATOR_PROMPT = (
     "budget, which option), ask one short question. Never ask for passwords, logins, codes or "
     "payment details; those are always the person's job.\n"
     "Your final answer is texted to the group as-is: plain text, no markdown headings, tables or "
-    "bold, short paragraphs or simple dashes, casual friendly tone, under 900 characters. Include "
-    "at most 3 links, and only ones you actually opened. If you wrote a longer document, say its "
-    "filename in one line; it will be attached."
+    "bold, short paragraphs or simple dashes, under 900 characters. Include at most 3 links, and "
+    "only ones you actually opened. If you wrote a longer document, say its filename in one line; "
+    "it will be attached."
+)
+
+VOICE_GUIDE = (
+    "\n\nThe final answer is posted by {bot_name}, the group's friend in the chat, as his own message. "
+    "Write it AS {bot_name}, first person, in his voice: his attitude, humor, slang and the way he talks "
+    "to these people. Here is how {bot_name} is described:\n<<<\n{persona}\n>>>\n"
+    "Answer what they actually asked in plain terms (a yes/no gets a yes or no), then let him be "
+    "himself: a joke, a jab at whoever asked, or a bit of attitude is expected, not optional. "
+    "Use that for tone and delivery only. The facts must stay exactly right: every name, address, time, "
+    "price, phone number and link precise and complete, nothing invented. Don't mention being an "
+    "assistant, a model or 'research tools'; if something couldn't be checked, say so in his words. "
+    "Your questions via ask_chat can be in his voice too."
 )
 
 
@@ -125,6 +137,8 @@ class TaskRunner:
         browser: bool = False,
         max_questions: int = 2,
         ask_timeout: float = 240.0,
+        bot_name: str = "",
+        persona: str = "",
     ):
         self.api_key = api_key
         self.model = model
@@ -136,6 +150,10 @@ class TaskRunner:
         self.use_browser = browser
         self.max_questions = max_questions
         self.ask_timeout = ask_timeout
+        self.system_prompt = OPERATOR_PROMPT + (
+            VOICE_GUIDE.replace("{bot_name}", bot_name).replace("{persona}", persona.strip()[:4000])
+            if bot_name and persona.strip() else ""
+        )
 
     def _prepare(self) -> Path:
         self.root.mkdir(parents=True, exist_ok=True)
@@ -169,7 +187,7 @@ class TaskRunner:
         os.chmod(config_dir, 0o700)
         return ClaudeAgentOptions(
             model=self.model,
-            system_prompt=OPERATOR_PROMPT,
+            system_prompt=self.system_prompt,
             tools=list(TOOLS),
             allowed_tools=list(TOOLS) + (list(MCP_TOOLS) if server is not None else []),
             permission_mode="dontAsk",
@@ -217,7 +235,8 @@ class TaskRunner:
                 server = build_server(browser, timed_ask, self.max_questions) if (browser or timed_ask) else None
                 query_fn, options = sdk_query, self._options(work, server)
             else:
-                query_fn, options = self._query, {"cwd": str(work), "root": str(self.root), "ask": timed_ask}
+                query_fn, options = self._query, {"cwd": str(work), "root": str(self.root), "ask": timed_ask,
+                                                  "system_prompt": self.system_prompt}
 
             async def consume():
                 nonlocal result

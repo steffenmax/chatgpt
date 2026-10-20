@@ -114,7 +114,8 @@ async def test_task_failure_and_shutdown_messages():
     agent, bb = _agent(FakeRunner(TaskResult(False, text="partial notes", reason="error_max_turns")))
     await agent.process(message("/task big job", guid="v1"))
     await agent._task_job
-    assert bb.texts[-1][1].startswith("couldn't finish that one, it took too many steps. here's what i got: partial notes")
+    assert bb.texts[-2][1] == "couldn't finish that one, it took too many steps"
+    assert bb.texts[-1][1] == "here's what i got before it fell apart:\npartial notes"
     agent, bb = _agent(FakeRunner(TaskResult(True, text="never"), delay=5))
     await agent.process(message("/task slow job", guid="v2"))
     await asyncio.sleep(0.02)
@@ -251,4 +252,37 @@ async def test_owner_only_tasks_in_a_group():
     assert await agent.process(message("5", sender="+15550001111", guid="o4")) == "handled:task_answer"
     await agent._task_job
     assert runner.answer == "5" and bb.texts[-1][1] == "done for 5"
+
+
+async def test_task_agent_is_told_to_write_in_the_bots_voice(tmp_path):
+    seen = {}
+
+    async def fake_query(prompt, options):
+        seen["system"] = options["system_prompt"]
+        yield ResultMessage("yo")
+
+    r = TaskRunner("k", "m", str(tmp_path / "t"), query_fn=fake_query, bot_name="Ricky",
+                   persona="You are Ricky, loud and crude, roasts everyone.")
+    await r.run("x", "Max", [])
+    assert "Write it AS Ricky" in seen["system"] and "loud and crude, roasts everyone" in seen["system"]
+    assert "facts must stay exactly right" in seen["system"]
+    r = TaskRunner("k", "m", str(tmp_path / "u"), query_fn=fake_query)
+    await r.run("x", "Max", [])
+    assert "Write it AS" not in seen["system"]
+
+
+async def test_task_result_is_sent_unchanged(tmp_path):
+    from imessage_agent.context import ContextStore
+    from tests.conftest import FakeBB, make_settings
+
+    s = make_settings(voice_acks=True, task_chat_guids=[ALLOWED])
+    bb = FakeBB()
+    llm = FakeLLM("on it, chief")
+    text = "keens on 36th, 212-947-3636, open till 10:30. don't wear the fedora, dan"
+    agent = Agent(s, bb, llm, ContextStore(10, 3600), images=None,
+                  resolver=SenderResolver(None, {"+15550001111": "Max"}, use_contacts=False),
+                  tasks=FakeRunner(TaskResult(True, text=text)))  # type: ignore[arg-type]
+    await agent.process(message("/task steak", guid="z1"))
+    await agent._task_job
+    assert bb.texts[-1][1] == text
 

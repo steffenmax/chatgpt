@@ -485,13 +485,13 @@ class Agent:
         if not res.ok:
             why = {"timeout": "it took too long", "error_max_turns": "it took too many steps",
                    "error_max_budget_usd": "it hit the spending cap"}.get(res.reason, "something went wrong")
-            text = f"couldn't finish that one, {why}"
+            plain = f"couldn't finish that one, {why}"
+            await self._say_in_voice(chat_guid, plain, plain)
             if res.text:
-                text += ". here's what i got: " + res.text[:700]
-            await self._say(chat_guid, text, remember=False)
+                await self._deliver(chat_guid, "here's what i got before it fell apart:\n" + res.text[:700])
             return
         text = res.text if len(res.text) <= 1500 else res.text[:1500].rsplit(" ", 1)[0] + " …"
-        await self._say(chat_guid, text, remember=False)
+        await self._deliver(chat_guid, text)
         self.context.add(chat_guid, self.s.bot_name, f"[finished a task for {who}: {text[:600]}]", from_bot=True)
         for f in res.files[:3]:
             try:
@@ -499,11 +499,18 @@ class Agent:
             except Exception as exc:  # noqa: BLE001
                 log_event("task.attach_failed", chat_guid=chat_guid, error=exc_name(exc))
 
+    async def _deliver(self, chat_guid: str, text: str) -> None:
+        """Task results arrive already written in the bot's voice by the task agent (see
+        TaskRunner voice). The local model doesn't rewrite them: in testing it dropped or
+        invented details in most attempts, and these carry phone numbers, times and prices."""
+        await self._say(chat_guid, text, remember=False)
+
     def _task_asker(self, chat_guid: str, requester: str | None = None):
         async def ask(question: str) -> str | None:
             fut = asyncio.get_running_loop().create_future()
             self._task_question = (chat_guid, fut, requester)
-            await self._say(chat_guid, f"quick q: {question}", remember=False)
+            await self._say_in_voice(chat_guid, f"quick q: {question}", f"quick q: {question}",
+                                     keep=tuple(set(re.findall(r"\d+", question))))
             log_event("task.asked", chat_guid=chat_guid, chars=len(question))
             try:
                 return await fut
