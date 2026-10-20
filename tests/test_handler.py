@@ -252,9 +252,11 @@ async def test_inline_reply_to_bot_message_counts_as_mention(agent_parts):
     # an inline reply to the bot's message triggers a reply without the name
     assert await agent.process(message("why though", guid="r1", threadOriginatorGuid="bot-msg-1")) == "handled:mention"
     assert len(llm.calls) == 2 and bb.texts == [(ALLOWED, "yo")]  # dispatcher + reply
-    # replyToGuid works too
-    assert await agent.process(message("ok", guid="r2", replyToGuid="bot-msg-1")) == "handled:mention"
-    assert len(llm.calls) == 4
+    # replyToGuid is only "the previous message": right after the bot it's a judgment call
+    assert await agent.process(message("ok", guid="r2", replyToGuid="bot-msg-1")) == "stored"  # judged no
+    assert len(llm.calls) == 3 and len(bb.texts) == 1
+    llm.reply_text = '{"to": "bot"}'
+    assert await agent.process(message("lol you wish", guid="r3", replyToGuid="bot-msg-1")) == "handled:mention"
 
 
 def _reaction_agent(clock, reply, **over):
@@ -731,3 +733,30 @@ async def test_mute_defaults_to_two_minutes(clock):
     agent, bb = _batch_agent(clock, _SysLLM("yo"))
     await agent.process(message("coco chill", guid="d1"))
     assert "2 min" in bb.texts[-1][1]
+
+
+
+async def test_followup_judgment_only_right_after_the_bot(agent_parts, monkeypatch):
+    s, bb, llm, ctx, agent = agent_parts
+    llm.reply_text = '{"to": "bot"}'
+    await agent.process(message("yo", from_me=True, guid="bot-1"))
+    # after someone else's message: not judged at all
+    assert await agent.process(message("dan you up", guid="f0", replyToGuid="someone")) == "stored"
+    assert llm.calls == []
+    # too long after the bot spoke: not judged either
+    agent._bot_guids["bot-1"] -= 600
+    assert await agent.process(message("ok", guid="f1", replyToGuid="bot-1")) == "stored"
+    assert llm.calls == []
+
+
+async def test_dm_messages_are_always_for_the_bot(clock):
+    from imessage_agent.context import ContextStore
+    from tests.conftest import FakeBB, FakeLLM, make_settings
+
+    dm = "iMessage;-;+15550001111"
+    s = make_settings(allowed_chat_guids=f"{ALLOWED},{dm}")
+    bb, llm = FakeBB(), FakeLLM("sup")
+    agent = Agent(s, bb, llm, ContextStore(5, 3600, clock=clock), images=None,  # type: ignore[arg-type]
+                  resolver=SenderResolver(None, {}, use_contacts=False))
+    assert await agent.process(message("what are you doing tonight", chat=dm, guid="dm1")) == "handled:mention"
+    assert bb.texts == [(dm, "sup")]

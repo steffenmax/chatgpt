@@ -169,6 +169,40 @@ def looks_like_image_request(text: str) -> bool:
     return True
 
 
+# A plain message right after the bot spoke: was it said to the bot?
+ADDRESSEE_SYSTEM = (
+    "You watch a group chat for {bot_name}. Lines marked (you) are {bot_name}'s. The LAST message came right "
+    "after {bot_name} spoke. Decide who the LAST message is for.\n"
+    "\"bot\": it reacts to what {bot_name} just said: agrees, disagrees, laughs at it (lol, lmao, 💀), is hurt "
+    "by it, argues with it, answers it, asks {bot_name} a follow-up, or roasts {bot_name}.\n"
+    "\"other\": it names or answers someone else, changes the subject, or carries on a conversation between "
+    "other people that has nothing to do with {bot_name}'s line.\n"
+    "Examples:\n"
+    "{bot_name} (you): giants by 10 / Tom: no way the jets got this -> bot\n"
+    "{bot_name} (you): 8:15 on espn / Chris: jack you driving or me -> other\n"
+    "{bot_name} (you): dan dresses like a sub teacher / Dan: ok that hurt -> bot\n"
+    "{bot_name} (you): knicks in 6 / Joe: anyone tryna get food later -> other\n"
+    "Answer ONLY with JSON matching the schema."
+)
+ADDRESSEE_SCHEMA = {"type": "object", "properties": {"to": {"type": "string", "enum": ["bot", "other"]}}, "required": ["to"]}
+
+
+def addressee_messages(history: list[ContextMessage], bot_name: str) -> list[dict[str, str]]:
+    lines = [f"{bot_name} (you): {m.text}" if m.from_bot else f"{m.sender}: {m.text}" for m in history[-8:]]
+    return [{"role": "user", "content": "\n".join(lines) + "\n\nWho is the LAST message for? JSON only."}]
+
+
+def parse_addressee(raw: str) -> bool:
+    text = _THINK_RE.sub("", raw or "").strip()
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        return False
+    try:
+        return json.loads(text[start : end + 1]).get("to") == "bot"
+    except (ValueError, AttributeError):
+        return False
+
+
 def intent_messages(history: list[ContextMessage]) -> list[dict[str, str]]:
     lines = [f"{m.sender}: {m.text}" for m in history[-8:]]
     return [{"role": "user", "content": "\n".join(lines) + "\n\nJSON only."}]

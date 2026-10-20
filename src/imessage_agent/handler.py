@@ -22,6 +22,8 @@ from .llm import (
     INTENT_SCHEMA,
     INTENT_SYSTEM,
     LOOKUP_NOTICES,
+    ADDRESSEE_SCHEMA,
+    ADDRESSEE_SYSTEM,
     AFTERWORD_SUFFIX,
     BATCH_NUDGE,
     CONSISTENCY_RULE,
@@ -30,6 +32,8 @@ from .llm import (
     afterword_ok,
     VOICE_SYSTEM_SUFFIX,
     Intent,
+    addressee_messages,
+    parse_addressee,
     TextBackend,
     build_messages,
     clean_reply,
@@ -61,6 +65,9 @@ def _norm_addr(a: str | None) -> str:
     a = (a or "").strip().lower()
     return a if "@" in a else re.sub(r"[^\d+]", "", a)
 _ECHOED_INSTRUCTION = re.compile(r"^\s*\w+\s*:|plain version|confirm that|let(ting)? the chat know|\bthey should\b")
+# A message without the name, right after the bot spoke, is judged only within this window.
+FOLLOWUP_WINDOW_SECONDS = 180
+
 _REFUSAL = re.compile(r"\b(can'?t|cannot|can not|won'?t|unable|not able|yourself)\b")
 
 
@@ -147,9 +154,10 @@ class Agent:
         self._task_chat: str | None = None
         # A question the task agent asked: the next plain message in that chat answers it.
         self._task_question: tuple[str, asyncio.Future, str | None] | None = None
-        # GUIDs of the bot's own messages (from isFromMe webhooks) so an inline reply
-        # to one of them counts as talking to the bot.
-        self._bot_guids: OrderedDict[str, None] = OrderedDict()
+        # GUIDs of the bot's own messages (from isFromMe webhooks) -> when they arrived, so an
+        # inline reply to one counts as talking to the bot, and a message right after one
+        # gets a judgment call.
+        self._bot_guids: OrderedDict[str, float] = OrderedDict()
         self._last_reaction: dict[str, float] = {}
         self._last_reaction_text: dict[str, str] = {}
         self._last_roast: dict[str, str] = {}
@@ -186,7 +194,7 @@ class Agent:
         guid = data.get("guid")
         if data.get("isFromMe"):
             if isinstance(guid, str) and guid:
-                self._bot_guids[guid] = None
+                self._bot_guids[guid] = time.monotonic()
                 while len(self._bot_guids) > 500:
                     self._bot_guids.popitem(last=False)
             return "ignored:from_me"
@@ -217,8 +225,13 @@ class Agent:
             while len(self._seen) > 1000:
                 self._seen.popitem(last=False)
         trigger = detect(text, self.s.bot_name)
-        reply_to = data.get("threadOriginatorGuid") or data.get("replyToGuid")
-        is_reply_to_bot = trigger.kind == "none" and isinstance(reply_to, str) and reply_to in self._bot_guids
+        # threadOriginatorGuid is a real inline reply. replyToGuid is only the previous message
+        # in the chat, so a message right after the bot's is a maybe: judged below.
+        thread = data.get("threadOriginatorGuid")
+        is_reply_to_bot = trigger.kind == "none" and isinstance(thread, str) and thread in self._bot_guids
+        prev = data.get("replyToGuid")
+        follows_bot = (trigger.kind == "none" and not is_reply_to_bot and isinstance(prev, str)
+                       and time.monotonic() - self._bot_guids.get(prev, -1e9) < FOLLOWUP_WINDOW_SECONDS)
         if is_reply_to_bot and text:
             trigger = Trigger("mention", text)
 
@@ -257,6 +270,12 @@ class Agent:
             self._maybe_update_memory(chat_guid)
             if chat_guid in self._pending:  # the chat is still going: let it settle before replying
                 self._pending[chat_guid]["last"] = time.monotonic()
+        how = "reply" if is_reply_to_bot else ""
+        if trigger.kind == "none" and text and not self._muted(chat_guid):
+            if ";-;" in chat_guid:  # a one-on-one chat with the bot: everything is for it
+                trigger, how = Trigger("mention", text), "dm"
+            elif follows_bot and await self._said_to_bot(chat_guid):
+                trigger, how = Trigger("mention", text), "followup"
         if trigger.kind == "none":
             if self._muted(chat_guid):
                 return "stored"
@@ -270,8 +289,8 @@ class Agent:
         if trigger.kind in ("mention", "ask") and self._muted(chat_guid):
             log_event("trigger", chat_guid=chat_guid, kind=trigger.kind, status="muted")
             return "muted"
-        if is_reply_to_bot:
-            log_event("trigger", chat_guid=chat_guid, kind=trigger.kind, reason="reply")
+        if how:
+            log_event("trigger", chat_guid=chat_guid, kind=trigger.kind, reason=how)
         else:
             log_event("trigger", chat_guid=chat_guid, kind=trigger.kind)
         try:
@@ -314,6 +333,24 @@ class Agent:
         return f"handled:{trigger.kind}"
 
     # ---------------------------------------------------------------- handlers
+    async def _said_to_bot(self, chat_guid: str) -> bool:
+        """Judgment call on a message that came right after the bot's, without its name."""
+        history = self.context.get(chat_guid)
+        if not history:
+            return False
+        try:
+            async with self._llm_gate:
+                structured = getattr(self.llm, "structured", None)
+                system = ADDRESSEE_SYSTEM.replace("{bot_name}", self.s.bot_name)
+                msgs = addressee_messages(_plain(history), self.s.bot_name)
+                raw = await structured(system, msgs, ADDRESSEE_SCHEMA) if structured else await self.llm.reply(system, msgs)
+        except Exception as exc:  # noqa: BLE001
+            log_event("followup.error", chat_guid=chat_guid, error=exc_name(exc))
+            return False
+        to_bot = parse_addressee(raw)
+        log_event("followup.judged", chat_guid=chat_guid, status="to_bot" if to_bot else "not_to_bot")
+        return to_bot
+
     def _muted(self, chat_guid: str) -> bool:
         until = self._muted_until.get(chat_guid)
         if until is None:
