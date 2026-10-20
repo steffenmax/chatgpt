@@ -162,18 +162,18 @@ function renderXQ(x) {
   const origin = {X_QUERIES: "from X_QUERIES", BRIEF_TOPICS: "from BRIEF_TOPICS (X_QUERIES is empty)", defaults: "built-in defaults (X_QUERIES and BRIEF_TOPICS are empty)"}[x.origin] || "";
   const last = x.last;
   const lastTxt = last ? `last pull ${last.at.replace("T", " ").slice(0, 16)}: ${last.posts} posts, $${Number(last.usd).toFixed(2)}${last.queries_failed ? `, ${last.queries_failed} failed` : ""}` : "not pulled yet";
-  $("xqmeta").textContent = `(${origin} · filters: ${x.filters} · last ${x.lookback_hours}h · ${lastTxt})`;
+  $("xqmeta").textContent = `(${origin} · filters: ${x.filters} · ${x.min_likes ? `${x.min_likes}+ likes · ` : ""}top liked first · last ${x.lookback_hours}h · ${lastTxt})`;
   const byQuery = {}; (last && last.per_query || []).forEach(r => byQuery[r.query] = r);
   const cell = (r) => {
     if (!r) return '<span class="note">not pulled yet</span>';
     if (r.status !== "ok") return pill(false, "", esc(r.status), "bad");
     if (!r.posts) return pill(false, "", "0 posts", "warn");
-    return `${pill(true, `${r.posts} posts`, "", "ok")} <span class="note">${r.kept} used</span>`;
+    return `${pill(true, `${r.posts} posts`, "", "ok")} <span class="note">${r.kept} kept</span>`;
   };
-  const rows = x.plan.map(q => `<tr><td><code>${esc(q.query)}</code></td><td>${q.posts}</td><td>${cell(byQuery[q.query])}</td></tr>`);
-  const dropped = (x.dropped || []).map(q => `<tr><td><code>${esc(q)}</code></td><td>0</td><td>${pill(false, "", "over the $ cap", "warn")}</td></tr>`);
+  const rows = x.plan.map(q => `<tr><td><code>${esc(q.query)}</code></td><td>${q.posts}</td><td>${q.min_likes ? kfmt(q.min_likes) + "+" : "any"}</td><td>${cell(byQuery[q.query])}</td></tr>`);
+  const dropped = (x.dropped || []).map(q => `<tr><td><code>${esc(q)}</code></td><td>0</td><td></td><td>${pill(false, "", "over the $ cap", "warn")}</td></tr>`);
   $("xq").innerHTML = (rows.length || dropped.length)
-    ? `<table><tr><th>Search</th><th>Asks for</th><th>Last pull</th></tr>${rows.join("")}${dropped.join("")}</table>`
+    ? `<table><tr><th>Search</th><th>Asks for</th><th>Min likes</th><th>Last pull</th></tr>${rows.join("")}${dropped.join("")}</table>`
       + `<p class="note">≈ $${x.est_usd_per_refresh.toFixed(2)} per refresh. Edit X_QUERIES in .env, then restart the bot; new searches show here as "not pulled yet" until the next refresh.</p>`
     : '<span class="note">no searches configured</span>';
 }

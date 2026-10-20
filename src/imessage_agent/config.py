@@ -160,6 +160,10 @@ class Settings(BaseSettings):
     # to cut betting touts and spam, or "is:verified" for bigger accounts only.
     x_query_filters: str = "lang:en -is:retweet -is:reply"
     x_posts_per_query: int = Field(default=15, ge=10, le=100)
+    # Keep only posts with at least this many likes (applied after the pull: the API has no
+    # likes filter on pay-per-use, so filtered-out posts are still billed). min_faves:N in a
+    # single search raises it for that search.
+    x_min_likes: int = Field(default=0, ge=0)
     x_lookback_hours: int = Field(default=48, ge=1, le=168)
     x_max_usd_per_refresh: float = Field(default=0.75, gt=0, le=20)
 

@@ -252,3 +252,25 @@ async def test_last_pull_posts_are_saved_privately_for_the_dashboard(tmp_path):
     await bad.pull()
     assert bad.last_posts()["searches"][0]["posts"][0]["text"] == "Knicks in 5"
     await bad.aclose()
+
+
+def test_engagement_operators_are_split_out():
+    from imessage_agent.xsearch import passes, split_engagement
+
+    assert split_engagement("from:a OR from:b min_faves:500") == ("from:a OR from:b", {"likes": 500})
+    assert split_engagement("(Knicks OR Jets) min_retweets:50 min_faves:1000") == ("(Knicks OR Jets)", {"reposts": 50, "likes": 1000})
+    assert split_engagement("NBA") == ("NBA", {})
+    p = {"public_metrics": {"like_count": 600, "retweet_count": 10}}
+    assert passes(p, {"likes": 500}) and not passes(p, {"likes": 500, "reposts": 50}) and passes(p, {})
+
+
+async def test_likes_minimum_applied_after_the_pull_and_top_liked_first(tmp_path):
+    seen: list = []
+    pages = {"NBA": [post(1, "small one", likes=40, rts=900), post(2, "big one", likes=5000), post(3, "middle one", likes=700, rts=1)]}
+    x = XSearch("tok", ["NBA min_faves:500"], posts_per_query=10, min_likes=100, transport=fake_api(pages, seen=seen))
+    assert x.status()["plan"][0]["min_likes"] == 500 and x.status()["plan"][0]["full"].startswith("NBA lang:en")
+    res = await x.pull()
+    assert seen[0]["query"] == "NBA lang:en -is:retweet -is:reply"  # the operator never reaches the API
+    assert res.posts == 3 and res.per_query[0]["kept"] == 2 and res.cost_usd == round(3 * POST_READ_USD, 4)  # billed for all 3
+    assert res.digest.index("big one") < res.digest.index("middle one") and "small one" not in res.digest
+    await x.aclose()

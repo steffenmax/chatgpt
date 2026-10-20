@@ -80,6 +80,7 @@ def build_x(settings: Settings, brief_path: Path) -> XSearch | None:
         lookback_hours=settings.x_lookback_hours,
         max_usd_per_refresh=settings.x_max_usd_per_refresh,
         filters=settings.x_query_filters,
+        min_likes=settings.x_min_likes,
         origin=settings.x_query_origin,
         ledger_path=str(brief_path.parent / "x-spend.json"),
         posts_path=str(brief_path.parent / "x-posts.json"),

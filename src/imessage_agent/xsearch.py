@@ -85,6 +85,27 @@ def topics_to_queries(topics: str) -> list[str]:
     return out[:MAX_QUERIES] or list(DEFAULT_QUERIES)
 
 
+# Engagement operators the pay-per-use API rejects ("not available in current product").
+# They're taken out of the query and applied to the posts that come back instead.
+_ENGAGEMENT = re.compile(r"\s*(?<![\w-])(min_faves|min_likes|min_retweets|min_reposts|min_replies):(\d+)\b", re.IGNORECASE)
+_METRIC = {"min_faves": "likes", "min_likes": "likes", "min_retweets": "reposts", "min_reposts": "reposts", "min_replies": "replies"}
+
+
+def split_engagement(query: str) -> tuple[str, dict[str, int]]:
+    """('NBA min_faves:500' -> ('NBA', {'likes': 500}))."""
+    mins: dict[str, int] = {}
+    for op, n in _ENGAGEMENT.findall(query or ""):
+        key = _METRIC[op.lower()]
+        mins[key] = max(mins.get(key, 0), int(n))
+    return _WS.sub(" ", _ENGAGEMENT.sub(" ", query or "")).strip(), mins
+
+
+def passes(post: dict[str, Any], mins: dict[str, int]) -> bool:
+    m = post.get("public_metrics") or {}
+    have = {"likes": m.get("like_count"), "reposts": m.get("retweet_count"), "replies": m.get("reply_count")}
+    return all(int(have[k] or 0) >= n for k, n in mins.items() if n > 0)
+
+
 def _quote(term: str) -> str:
     term = term.strip().strip('"')
     return f'"{term}"' if " " in term else term
@@ -118,14 +139,17 @@ def _clean(text: str) -> str:
 
 
 def rank(posts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Most engaged first; drop near-duplicates (copy-pasta, spam)."""
+    """Most liked first (overall engagement breaks ties); drop near-duplicates (copy-pasta, spam)."""
     def score(p: dict[str, Any]) -> int:
         m = p.get("public_metrics") or {}
         return int(m.get("like_count") or 0) + 2 * (int(m.get("retweet_count") or 0) + int(m.get("quote_count") or 0)) + int(m.get("reply_count") or 0)
 
+    def likes(p: dict[str, Any]) -> int:
+        return int((p.get("public_metrics") or {}).get("like_count") or 0)
+
     seen: set[str] = set()
     out = []
-    for p in sorted(posts, key=score, reverse=True):
+    for p in sorted(posts, key=lambda p: (likes(p), score(p)), reverse=True):
         text = _clean(str(p.get("text") or ""))
         key = re.sub(r"\W+", "", text.lower())[:60]
         if len(key) < 4 or key in seen:  # empty, emoji-only, or a copy of one we kept
@@ -164,8 +188,10 @@ class XSearch:
         filters: str = FILTERS,
         origin: str = "",
         posts_path: str | None = None,
+        min_likes: int = 0,
     ):
         self.queries = [q for q in queries if q.strip()][:MAX_QUERIES]
+        self.min_likes = max(0, min_likes)  # X_MIN_LIKES: applied to every search after the pull
         self.origin = origin  # where the queries came from (X_QUERIES, BRIEF_TOPICS, defaults), for the dashboard
         # The last pull's posts (0600 JSON, replaced each pull) so the owner can see them in the dashboard.
         self.posts_path = Path(posts_path).expanduser() if posts_path else None
@@ -263,7 +289,9 @@ class XSearch:
             "origin": self.origin,
             "filters": self.filters,
             "lookback_hours": self.lookback_hours,
-            "plan": [{"query": q, "full": full_query(q, self.filters), "posts": n} for q, n in plan],
+            "min_likes": self.min_likes,
+            "plan": [{"query": q, "full": full_query(split_engagement(q)[0], self.filters), "posts": n,
+                      "min_likes": max(self.min_likes, split_engagement(q)[1].get("likes", 0))} for q, n in plan],
             "dropped": [q for q in self.queries if q not in planned],  # over the per-refresh cap
             "queries": len(self.plan()),
             "queries_configured": len(self.queries),
@@ -286,8 +314,10 @@ class XSearch:
         for i, (query, n) in enumerate(plan):
             row: dict[str, Any] = {"query": query, "requested": n, "posts": 0, "kept": 0, "status": "ok"}
             res.per_query.append(row)
+            api_query, mins = split_engagement(query)
+            mins["likes"] = max(mins.get("likes", 0), self.min_likes)
             params = {
-                "query": full_query(query, self.filters),
+                "query": full_query(api_query, self.filters),
                 "max_results": n,
                 "sort_order": "relevancy",
                 "start_time": start_time,
@@ -322,7 +352,7 @@ class XSearch:
             res.queries_ok += 1
             res.posts += len(posts)
             res.cost_usd += len(posts) * POST_READ_USD
-            ranked = rank(posts)
+            ranked = rank([p for p in posts if passes(p, mins)])  # X still bills for every post it returned
             row["posts"], row["kept"] = len(posts), len(ranked)
             pulled.append({"query": query, "returned": len(posts), "posts": [{
                 "id": str(p.get("id") or ""), "text": p["text"], "created_at": p.get("created_at"),
