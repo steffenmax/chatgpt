@@ -65,9 +65,21 @@ REACTION_ADDENDUM = (
 )
 
 
-def reaction_addendum(last: str | None = None, rng=random) -> str:
+def reaction_addendum(last: str | None = None, rng=random, gifs: bool = False) -> str:
     examples = ", ".join(f"'{e}'" for e in rng.sample(REACTION_EXAMPLES, 6))
-    return REACTION_ADDENDUM.replace("{examples}", examples).replace("{last}", f" ('{last}')" if last else "")
+    out = REACTION_ADDENDUM.replace("{examples}", examples).replace("{last}", f" ('{last}')" if last else "")
+    if gifs:
+        out += (" Instead of words you may send a reaction GIF: answer 'GIF: ' and a 2-4 word search "
+                "(e.g. 'GIF: michael scott no'). Use that only now and then.")
+    return out
+
+
+def looks_like_gif_request(text: str) -> bool:
+    return bool(re.search(r"\bgifs?\b", text or "", re.IGNORECASE))
+
+
+def looks_like_tweet_request(text: str) -> bool:
+    return bool(re.search(r"\b(tweets?|twitter|x posts?|post from x|posts? on x)\b", text or "", re.IGNORECASE))
 
 
 MEMORY_SYSTEM = (
@@ -126,6 +138,9 @@ INTENT_SYSTEM = (
     "- \"lookup\": answering needs current or outside information (scores, schedules, news, prices, "
     "weather, hours, who won, precise stats/dates).\n"
     "- \"forget\": they explicitly ask {bot_name} to forget/wipe what it remembers.\n"
+    "- \"gif\": they ask {bot_name} for a GIF. Put what the GIF should show in \"prompt\" (2-5 words).\n"
+    "- \"tweet\": they ask {bot_name} to find or send a tweet/post from Twitter/X. Put the topic in "
+    "\"prompt\" (2-5 words).\n"
     "- \"chat\": anything else: banter, opinions, roasts, advice, general knowledge, questions "
     "{bot_name} can answer from memory. When unsure, choose chat."
 )
@@ -133,7 +148,7 @@ INTENT_SYSTEM = (
 INTENT_SCHEMA = {
     "type": "object",
     "properties": {
-        "action": {"type": "string", "enum": ["chat", "image", "remind", "lookup", "forget"]},
+        "action": {"type": "string", "enum": ["chat", "image", "remind", "lookup", "forget", "gif", "tweet"]},
         "prompt": {"type": "string"},
         "when": {"type": "string"},
         "what": {"type": "string"},
@@ -220,11 +235,11 @@ def parse_intent(raw: str) -> Intent:
     if not isinstance(data, dict):
         return Intent()
     action = str(data.get("action") or "chat").lower().strip()
-    if action not in ("chat", "image", "remind", "lookup", "forget"):
+    if action not in ("chat", "image", "remind", "lookup", "forget", "gif", "tweet"):
         action = "chat"
     g = lambda k: str(data.get(k) or "").strip()[:600]
     intent = Intent(action, g("prompt"), g("when"), g("what"))
-    if intent.action == "image" and not intent.prompt:
+    if intent.action in ("image", "gif", "tweet") and not intent.prompt:
         return Intent()
     if intent.action == "remind" and not (intent.when and intent.what):
         return Intent()

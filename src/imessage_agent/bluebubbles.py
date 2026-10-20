@@ -89,7 +89,8 @@ class BlueBubblesClient:
         r = await self._client.post("/api/v1/message/text", params=self._params(), json=payload)
         return self._unwrap(r) or {}
 
-    async def send_attachment(self, chat_guid: str, file_path: Path, name: str | None = None) -> dict[str, Any]:
+    async def send_attachment(self, chat_guid: str, file_path: Path, name: str | None = None,
+                              mime: str = "image/png") -> dict[str, Any]:
         name = name or file_path.name
         data = {
             "chatGuid": chat_guid,
@@ -98,7 +99,7 @@ class BlueBubblesClient:
             "method": self.send_method,
         }
         with file_path.open("rb") as fh:
-            files = {"attachment": (name, fh, "image/png")}
+            files = {"attachment": (name, fh, mime)}
             r = await self._client.post(
                 "/api/v1/message/attachment",
                 params=self._params(),

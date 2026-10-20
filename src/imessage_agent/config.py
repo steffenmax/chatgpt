@@ -178,6 +178,17 @@ class Settings(BaseSettings):
     link_x_replies: bool = True
     link_max_chars: int = Field(default=900, ge=200, le=3000)
 
+    # --- GIFs and tweets (media.py) ---
+    # GIFs come from GIPHY (free key at developers.giphy.com); empty key = no GIFs.
+    giphy_api_key: str = ""
+    gif_rating: Literal["g", "pg", "pg-13", "r"] = "pg-13"
+    # Funny tweets: an X recent search on what the chat is talking about (uses X_BEARER_TOKEN,
+    # billed per post returned, search words come from the chat). Off unless TWEETS_ENABLED.
+    tweets_enabled: bool = False
+    tweet_min_likes: int = Field(default=200, ge=0)
+    tweet_posts_per_search: int = Field(default=10, ge=10, le=100)
+    tweets_per_hour: int = Field(default=6, ge=1, le=60)
+
     # --- dashboard (loopback only, same port as the webhook) ---
     # http://127.0.0.1:PORT/dashboard : health, what the bot can see and connect to,
     # memory notes (editable), reminders, live events. Off by default.
@@ -272,6 +283,10 @@ class Settings(BaseSettings):
             hosts.append(("Links shared in allowlisted chats", "any website:443"))
             hosts.append(("X posts and replies (shared X links)",
                           "api.fxtwitter.com:443" if self.link_x_replies else "cdn.syndication.twimg.com:443"))
+        if self.giphy_api_key:
+            hosts.append(("GIPHY (GIF search, words from the chat)", "api.giphy.com:443, media*.giphy.com:443"))
+        if self.tweets_enabled and self.x_bearer_token:
+            hosts.append(("X API (tweet search, words from the chat)", "api.x.com:443"))
         if self.task_enabled:
             hosts.append(("Anthropic API (/task agent)", "api.anthropic.com:443"))
             hosts.append(("Web pages fetched during /task", "any website:443"))

@@ -39,7 +39,9 @@ from .llm import (
     fix_speaker,
     intent_messages,
     is_refusal,
+    looks_like_gif_request,
     looks_like_image_request,
+    looks_like_tweet_request,
     parse_intent,
     parse_reaction,
     reaction_addendum,
@@ -52,6 +54,7 @@ from .llm import (
 from .llm import OllamaBackend
 from .linkreader import LinkReader, find_urls, strip_cards
 from .logsafe import exc_name, log_event
+from .media import GifSearch, TweetFinder, describe_tweet, gif_from_reaction
 from .memory import MemoryStore
 from .reminders import MAX_DAYS_AHEAD, Reminder, ReminderStore, describe, parse
 from .task import TaskRunner
@@ -132,6 +135,8 @@ class Agent:
         tasks: TaskRunner | None = None,
         brief=None,
         links: LinkReader | None = None,
+        gifs: GifSearch | None = None,
+        tweets: TweetFinder | None = None,
     ):
         self.s = settings
         self.bb = bb
@@ -149,6 +154,9 @@ class Agent:
         self.brief = brief
         # Optional link reader: links people share get a short card of what's behind them.
         self.links = links
+        # Optional GIF search (GIPHY) and funny-tweet search (X); see media.py.
+        self.gifs = gifs
+        self.tweets = tweets
         self._link_reads: dict[str, set[asyncio.Task]] = {}
         self._task_job: asyncio.Task | None = None
         self._task_chat: str | None = None
@@ -304,6 +312,8 @@ class Agent:
                         cloud_facts=self.cloud is not None,
                         reminders=self.reminders is not None,
                         task=self.tasks is not None and chat_guid in self.s.task_chat_guids,
+                        gifs=self.gifs is not None,
+                        tweets=self.tweets is not None,
                     ),
                 )
             elif trigger.kind == "forget":
@@ -316,6 +326,10 @@ class Agent:
                 await self._handle_unmute(chat_guid)
             elif trigger.kind == "image":
                 await self._handle_image(chat_guid, trigger.arg)
+            elif trigger.kind == "gif":
+                await self._handle_gif(chat_guid, trigger.arg)
+            elif trigger.kind == "tweet":
+                await self._handle_tweet(chat_guid, trigger.arg)
             elif trigger.kind in ("mention", "ask"):
                 if self.s.reply_batch_seconds > 0:
                     self._queue_mention(chat_guid, stored, sender, force_cloud=trigger.kind == "ask")
@@ -451,6 +465,14 @@ class Agent:
             log_event("intent", chat_guid=chat_guid, kind="image")
             await self._handle_image(chat_guid, intent.prompt)
             return
+        if intent.action == "gif":
+            log_event("intent", chat_guid=chat_guid, kind="gif")
+            await self._handle_gif(chat_guid, intent.prompt)
+            return
+        if intent.action == "tweet":
+            log_event("intent", chat_guid=chat_guid, kind="tweet")
+            await self._handle_tweet(chat_guid, intent.prompt)
+            return
         if intent.action == "remind" and self.reminders is not None:
             log_event("intent", chat_guid=chat_guid, kind="remind")
             await self._handle_remind(chat_guid, who, f"{intent.when} {intent.what}")
@@ -546,7 +568,16 @@ class Agent:
         intent = parse_intent(raw)
         if intent.action == "lookup" and self.cloud is None:
             return Intent()
-        if intent.action == "image" and not looks_like_image_request(strip_cards(history[-1].text)):
+        last = strip_cards(history[-1].text)
+        if intent.action == "gif" and not looks_like_gif_request(last):
+            log_event("intent.vetoed", kind="gif")
+            return Intent()
+        if intent.action == "tweet" and not looks_like_tweet_request(last):
+            log_event("intent.vetoed", kind="tweet")
+            return Intent()
+        if intent.action == "image" and looks_like_gif_request(last):
+            return Intent("gif", intent.prompt)  # "send a gif of ..." is a GIF, not a generated picture
+        if intent.action == "image" and not looks_like_image_request(last):
             log_event("intent.vetoed", kind="image")
             return Intent()
         return intent
@@ -828,8 +859,14 @@ class Agent:
         try:
             async with self._llm_gate:
                 last = self._last_reaction_text.get(chat_guid)
-                raw = await self.llm.reply(self._system_for(chat_guid) + reaction_addendum(last),
+                raw = await self.llm.reply(self._system_for(chat_guid) + reaction_addendum(last, gifs=self.gifs is not None),
                                            build_messages(self.s.persona, self.s.bot_name, history))
+            gif_query = gif_from_reaction(raw) if self.gifs is not None else None
+            if gif_query:
+                self._last_reaction_text[chat_guid] = "GIF: " + gif_query
+                await self._send_gif(chat_guid, gif_query)
+                log_event("reaction.sent", chat_guid=chat_guid, kind="gif")
+                return
             reaction = parse_reaction(raw)
             if reaction and last and reaction.lower().rstrip("o!. ") == last.lower().rstrip("o!. "):
                 reaction = None  # same as last time
@@ -913,6 +950,55 @@ class Agent:
                     "or wildest part, a roast, or a reply that caught your eye. Don't ask if anyone saw it."))
         except Exception as exc:  # noqa: BLE001
             log_event("handler.error", chat_guid=chat_guid, kind="quiet_link", error=exc_name(exc))
+
+    async def _handle_gif(self, chat_guid: str, query: str) -> None:
+        if self.gifs is None:
+            await self._say(chat_guid, "no gifs, nobody set me up with giphy", remember=False)
+            return
+        if not query.strip():
+            await self._say(chat_guid, "a gif of what", remember=False)
+            return
+        if not await self._send_gif(chat_guid, query):
+            await self._say(chat_guid, "couldn't find a gif for that", remember=False)
+
+    async def _send_gif(self, chat_guid: str, query: str) -> bool:
+        try:
+            gif = await self.gifs.find(query)  # type: ignore[union-attr]
+        except Exception as exc:  # noqa: BLE001
+            log_event("gif.failed", chat_guid=chat_guid, error=exc_name(exc))
+            return False
+        if gif is None:
+            log_event("gif.none", chat_guid=chat_guid)
+            return False
+        try:
+            await self.bb.send_attachment(chat_guid, gif.path, name=f"{self.s.bot_name.lower()}.gif", mime="image/gif")
+        finally:
+            gif.path.unlink(missing_ok=True)
+        log_event("gif.sent", chat_guid=chat_guid)
+        self.context.add(chat_guid, self.s.bot_name, f"[sent a gif: {gif.query}]", from_bot=True)
+        return True
+
+    async def _handle_tweet(self, chat_guid: str, query: str) -> None:
+        if self.tweets is None:
+            await self._say(chat_guid, "can't pull tweets, that's not switched on", remember=False)
+            return
+        if not query.strip():
+            await self._say(chat_guid, "a tweet about what", remember=False)
+            return
+        if not self.tweets.allowed():
+            await self._say(chat_guid, "i'm tapped out on tweets for the hour", remember=False)
+            return
+        try:
+            tweet = await self.tweets.find(query)
+        except Exception as exc:  # noqa: BLE001
+            log_event("tweet.failed", chat_guid=chat_guid, error=exc_name(exc))
+            tweet = None
+        if tweet is None:
+            await self._say(chat_guid, "couldn't find anything good on that", remember=False)
+            return
+        await self._say(chat_guid, tweet.url, remember=False)
+        log_event("tweet.sent", chat_guid=chat_guid)
+        self.context.add(chat_guid, self.s.bot_name, describe_tweet(tweet), from_bot=True)
 
     async def _handle_image(self, chat_guid: str, prompt: str) -> None:
         if not self.s.image_enabled or self.images is None:

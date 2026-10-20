@@ -19,6 +19,7 @@ from .reminders import ReminderStore
 from .brief import CultureBrief
 from .task import TaskRunner
 from .linkreader import LinkReader
+from .media import GifSearch, TweetFinder
 from .vision import OllamaVision
 from .context import ContextStore
 from .egress import print_egress_report
@@ -202,8 +203,9 @@ def create_app(settings: Settings | None = None, agent: Agent | None = None, env
                 await ag.images.stop()
             await ag.stop_task()
             await ag.drain()
-            if ag.links is not None:
-                await ag.links.aclose()
+            for client in (ag.links, ag.gifs, ag.tweets):
+                if client is not None:
+                    await client.aclose()
             ag.context.forget_all()  # context never survives a restart
             if app.state.owns_agent:
                 await ag.bb.aclose()
@@ -270,6 +272,8 @@ def create_app(settings: Settings | None = None, agent: Agent | None = None, env
             "reminders_enabled": ag.reminders is not None,
             "vision_enabled": ag.vision is not None,
             "links_enabled": ag.links is not None,
+            "gifs_enabled": ag.gifs is not None,
+            "tweets_enabled": ag.tweets is not None,
             "task_enabled": ag.tasks is not None,
             "brief_enabled": ag.brief is not None,
             "brief_source": ag.brief.source if ag.brief is not None else None,
@@ -373,6 +377,12 @@ def _build_agent(settings: Settings) -> Agent:
         brief=build_brief(settings),
         links=LinkReader(settings.link_x_replies, settings.link_max_chars, vision=vision, gate=llm_gate)
         if settings.links_enabled
+        else None,
+        gifs=GifSearch(settings.giphy_api_key, settings.gif_rating) if settings.giphy_api_key else None,
+        tweets=TweetFinder(settings.x_bearer_token, min_likes=settings.tweet_min_likes,
+                           posts_per_search=settings.tweet_posts_per_search, per_hour=settings.tweets_per_hour,
+                           filters=settings.x_query_filters)
+        if settings.tweets_enabled and settings.x_bearer_token
         else None,
     )
     agent_holder["a"] = agent

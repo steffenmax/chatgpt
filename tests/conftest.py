@@ -25,8 +25,9 @@ class FakeBB:
         self.texts.append((chat_guid, text))
         return {"guid": "sent"}
 
-    async def send_attachment(self, chat_guid, file_path: Path, name=None):
+    async def send_attachment(self, chat_guid, file_path: Path, name=None, mime="image/png"):
         self.attachments.append((chat_guid, file_path, file_path.read_bytes()))
+        self.mimes = getattr(self, "mimes", []) + [mime]
         return {"guid": "sent-att"}
 
     async def get_message(self, guid):

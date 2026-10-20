@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-Kind = Literal["mention", "ask", "image", "help", "forget", "remind", "reminders", "task", "mute", "unmute", "none"]
+Kind = Literal["mention", "ask", "image", "help", "forget", "remind", "reminders", "task", "mute", "unmute", "gif", "tweet", "none"]
 
 
 @dataclass(frozen=True)
@@ -18,6 +18,7 @@ class Trigger:
 _COMMANDS = {
     "/image": "image", "/img": "image", "/ask": "ask", "/help": "help", "/forget": "forget",
     "/remind": "remind", "/reminders": "reminders", "/task": "task", "/mute": "mute", "/unmute": "unmute",
+    "/gif": "gif", "/tweet": "tweet",
 }
 
 DEFAULT_MUTE_SECONDS = 2 * 60
@@ -97,7 +98,8 @@ def detect(text: str | None, bot_name: str) -> Trigger:
     return Trigger("none")
 
 
-def help_text(bot_name: str, image_enabled: bool, cloud_facts: bool = False, reminders: bool = False, task: bool = False) -> str:
+def help_text(bot_name: str, image_enabled: bool, cloud_facts: bool = False, reminders: bool = False, task: bool = False,
+              gifs: bool = False, tweets: bool = False) -> str:
     where = "most of it runs on one mac" if cloud_facts else "everything i do runs on one mac, nothing leaves it"
     lines = [
         f"hey, i'm {bot_name}. {where}.",
@@ -107,6 +109,10 @@ def help_text(bot_name: str, image_enabled: bool, cloud_facts: bool = False, rem
         lines.append("- /ask <question> - i'll look it up online (that one leaves the mac)")
     if image_enabled:
         lines.append("- /image <prompt> - i'll make a picture (takes a bit)")
+    if gifs:
+        lines.append("- /gif <what> - i'll find a gif")
+    if tweets:
+        lines.append("- /tweet <topic> - i'll dig up the most-liked tweet about it (leaves the mac)")
     if task:
         lines.append("- /task <job> - i'll go research it properly and come back (owner only, takes a few min, leaves the mac)")
     if reminders:
