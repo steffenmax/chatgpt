@@ -28,6 +28,7 @@ from .llm import (
     CONSISTENCY_RULE,
     REFUSAL_ROASTS,
     SELF_ONLY_RULE,
+    UNANSWERED_GIF_SYSTEM,
     afterword_ok,
     VOICE_SYSTEM_SUFFIX,
     Intent,
@@ -54,7 +55,7 @@ from .llm import (
 from .llm import OllamaBackend
 from .linkreader import LinkReader, find_urls, strip_cards
 from .logsafe import exc_name, log_event
-from .media import GifSearch, TweetFinder, describe_tweet, gif_from_reaction
+from .media import GifSearch, TweetFinder, clean_query, describe_tweet, gif_from_reaction
 from .memory import MemoryStore
 from .reminders import MAX_DAYS_AHEAD, Reminder, ReminderStore, describe, parse
 from .task import TaskRunner
@@ -172,6 +173,9 @@ class Agent:
         self._last_roast: dict[str, str] = {}
         # message GUID -> {"chat", "who": addresses that laughed, "fired": milestones already said}
         self._laughs: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        # chat -> (last unanswered message, when it gets a GIF); one timer task per chat
+        self._unanswered: dict[str, tuple[Any, float]] = {}
+        self._unanswered_tasks: dict[str, asyncio.Task] = {}
         self._participants: dict[str, tuple[float, list[str]]] = {}
         # One reply at a time per chat, and mentions waiting to be answered together.
         self._chat_locks: dict[str, asyncio.Lock] = {}
@@ -289,6 +293,8 @@ class Agent:
                 trigger, how = Trigger("mention", text), "dm"
             elif follows_bot and await self._said_to_bot(chat_guid):
                 trigger, how = Trigger("mention", text), "followup"
+        if trigger.kind == "none" and stored is not None:
+            self._arm_unanswered(chat_guid, stored)
         if trigger.kind == "none":
             if self._muted(chat_guid):
                 return "stored"
@@ -438,6 +444,47 @@ class Agent:
                 await self._reply(chat_guid, self.context.get(chat_guid), use_cloud=False, reason="haha", nudge=nudge)
             except Exception as exc:  # noqa: BLE001
                 log_event("handler.error", chat_guid=chat_guid, kind="haha", error=exc_name(exc))
+
+    def _arm_unanswered(self, chat_guid: str, marker) -> None:
+        """(Re)start the chat's 'nobody answered' clock for its newest message."""
+        if self.gifs is None or self.s.unanswered_gif_minutes <= 0:
+            return
+        self._unanswered[chat_guid] = (marker, time.monotonic() + self.s.unanswered_gif_minutes * 60)
+        t = self._unanswered_tasks.get(chat_guid)
+        if t is None or t.done():
+            # not in self._tasks: drain() must not wait half an hour on shutdown
+            self._unanswered_tasks[chat_guid] = asyncio.create_task(self._unanswered_loop(chat_guid))
+
+    async def _unanswered_loop(self, chat_guid: str) -> None:
+        while True:
+            entry = self._unanswered.get(chat_guid)
+            if entry is None:
+                return
+            marker, due = entry
+            wait = due - time.monotonic()
+            if wait > 0:
+                await asyncio.sleep(wait)
+                continue  # a newer message may have moved the deadline
+            self._unanswered.pop(chat_guid, None)
+            history = self.context.get(chat_guid)
+            if not history or history[-1] is not marker or self._muted(chat_guid):
+                return  # someone (or the bot) said something after it, or he's muted
+            log_event("trigger", chat_guid=chat_guid, kind="unanswered_gif")
+            query = "crickets"
+            try:
+                async with self._llm_gate:
+                    raw = await self.llm.reply(
+                        UNANSWERED_GIF_SYSTEM.replace("{sender}", marker.sender).replace("{text}", strip_cards(marker.text)[:200]),
+                        [{"role": "user", "content": "GIF search:"}])
+                query = clean_query(raw.splitlines()[0] if raw else "", 40) or query
+            except Exception as exc:  # noqa: BLE001
+                log_event("handler.error", chat_guid=chat_guid, kind="unanswered_gif", error=exc_name(exc))
+            async with self._chat_lock(chat_guid):
+                h = self.context.get(chat_guid)
+                if h and h[-1] is marker and not self._muted(chat_guid):
+                    if not await self._send_gif(chat_guid, query) and query != "crickets":
+                        await self._send_gif(chat_guid, "crickets")
+            return
 
     async def _said_to_bot(self, chat_guid: str) -> bool:
         """Judgment call on a message that came right after the bot's, without its name."""
@@ -1150,6 +1197,9 @@ class Agent:
             log_event("chat.not_allowlisted", chat_guid=chat_guid, allowed=False)
 
     async def drain(self) -> None:
+        for t in self._unanswered_tasks.values():
+            t.cancel()
+        self._unanswered.clear()
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
 

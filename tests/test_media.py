@@ -125,3 +125,59 @@ async def test_chime_in_can_be_a_gif(clock):
     await agent.process(message("dan fell off the boat again", guid="c1"))
     await agent.drain()
     assert len(bb.attachments) == 1 and bb.texts == []
+
+
+async def test_unanswered_message_gets_a_gif_after_the_wait(clock, monkeypatch):
+    import asyncio
+
+    import imessage_agent.handler as h
+
+    agent, bb, llm = _agent(clock, llm_reply="hello is anyone there", unanswered_gif_minutes=30)
+    now = [1000.0]
+    monkeypatch.setattr(h.time, "monotonic", lambda: now[0])
+    real_sleep = asyncio.sleep
+
+    async def fast_sleep(sec):
+        now[0] += sec
+        await real_sleep(0)
+
+    monkeypatch.setattr(h.asyncio, "sleep", fast_sleep)
+    await agent.process(message("anyone want to grab food", guid="u1"))
+    for _ in range(5):
+        await real_sleep(0)
+    assert len(bb.attachments) == 1 and agent.context.get(ALLOWED)[-1].text == "[sent a gif: hello is anyone there]"
+
+
+async def test_no_gif_when_someone_answers_or_off(clock, monkeypatch):
+    import asyncio
+
+    import imessage_agent.handler as h
+
+    agent, bb, llm = _agent(clock, llm_reply="crickets", unanswered_gif_minutes=30)
+    now = [1000.0]
+    monkeypatch.setattr(h.time, "monotonic", lambda: now[0])
+    real_sleep = asyncio.sleep
+    first, never = asyncio.Event(), asyncio.Event()
+    calls = []
+
+    async def held_sleep(sec):
+        calls.append(sec)
+        if len(calls) == 1:
+            await first.wait()
+            now[0] = 1000.0 + 1800  # wake exactly at the first message's deadline
+        else:
+            await never.wait()
+
+    monkeypatch.setattr(h.asyncio, "sleep", held_sleep)
+    m1 = await agent.process(message("anyone want to grab food", guid="u2"))
+    now[0] += 60
+    await agent.process(message("yeah im down", guid="u3", sender="+15550002222"))  # answered
+    first.set()
+    for _ in range(5):
+        await real_sleep(0)
+    assert m1 == "stored" and bb.attachments == []
+    assert agent._unanswered[ALLOWED][0].text == "yeah im down" and calls[-1] == 60  # waiting on the newer one
+    await agent.drain()  # cancels the timer, doesn't wait for it
+    off, bb2, _ = _agent(clock, llm_reply="crickets")
+    await off.process(message("anyone", guid="u4"))
+    assert off._unanswered_tasks == {}

@@ -74,6 +74,13 @@ def reaction_addendum(last: str | None = None, rng=random, gifs: bool = False) -
     return out
 
 
+UNANSWERED_GIF_SYSTEM = (
+    "{sender} said this in a group chat and nobody has answered for half an hour: \"{text}\"\n"
+    "Pick a reaction GIF to drop on it: something like crickets, hello is anyone there, awkward silence, or a "
+    "joke about what they said. Answer with ONLY a 2-4 word GIF search, nothing else."
+)
+
+
 def looks_like_gif_request(text: str) -> bool:
     return bool(re.search(r"\bgifs?\b", text or "", re.IGNORECASE))
 

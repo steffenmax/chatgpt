@@ -192,6 +192,9 @@ class Settings(BaseSettings):
     tweet_min_likes: int = Field(default=200, ge=0)
     tweet_posts_per_search: int = Field(default=10, ge=10, le=100)
     tweets_per_hour: int = Field(default=6, ge=1, le=60)
+    # A message nobody (the bot included) answers for this many minutes gets a reaction GIF.
+    # Needs GIPHY_API_KEY. 0 = off.
+    unanswered_gif_minutes: float = Field(default=0.0, ge=0.0)
 
     # --- dashboard (loopback only, same port as the webhook) ---
     # http://127.0.0.1:PORT/dashboard : health, what the bot can see and connect to,
