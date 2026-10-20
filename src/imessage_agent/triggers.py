@@ -20,7 +20,7 @@ _COMMANDS = {
     "/remind": "remind", "/reminders": "reminders", "/task": "task", "/mute": "mute", "/unmute": "unmute",
 }
 
-DEFAULT_MUTE_SECONDS = 30 * 60
+DEFAULT_MUTE_SECONDS = 2 * 60
 MAX_MUTE_SECONDS = 24 * 3600
 # "<name> chill", "<name> shut up for an hour": short messages only, so "ricky what's a chill bar" isn't one.
 _MUTE_WORDS = re.compile(
@@ -113,7 +113,7 @@ def help_text(bot_name: str, image_enabled: bool, cloud_facts: bool = False, rem
         lines.append("- /remind in 20m <what>, /remind at 7pm <what>, /remind tomorrow 9am <what> - i'll post it here then")
         lines.append("- /reminders - what's pending, /remind cancel <n> - drop one")
     lines += [
-        f"- \"{bot_name} chill\" or /mute 30m - i'll stay quiet in this chat for a while, /unmute to bring me back",
+        f"- \"{bot_name} chill\" or /mute 30m - i'll stay quiet in this chat (2 min unless you say how long), /unmute to bring me back",
         "- /forget - wipe what i remember from this chat",
         "- /help - this",
         "i only remember the last few messages here, and forget them after a while anyway.",

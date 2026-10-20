@@ -725,3 +725,9 @@ async def test_mute_expires(clock, monkeypatch):
     real = _time.monotonic()
     monkeypatch.setattr("imessage_agent.handler.time.monotonic", lambda: real + 301)
     assert not agent._muted(ALLOWED)
+
+
+async def test_mute_defaults_to_two_minutes(clock):
+    agent, bb = _batch_agent(clock, _SysLLM("yo"))
+    await agent.process(message("coco chill", guid="d1"))
+    assert bb.texts[-1][1].endswith("2 min")
