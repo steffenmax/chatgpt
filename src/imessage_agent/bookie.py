@@ -1,4 +1,5 @@
-"""Ricky the bookie: fake-money NFL moneyline bets, per chat.
+"""Ricky the bookie: fake-money moneyline bets on NFL, college football, NBA, WNBA, NHL, MLB and
+college basketball games, per chat.
 
 Everyone starts with BOOKIE_START bucks. A bet locks the moneyline at the time it's
 placed (DraftKings via ESPN; even money if there's no line) and can only be placed
@@ -18,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .sports import Game, american_profit, fmt_odds, now_utc
+from .sports import LEAGUES, Game, american_profit, et_date, fmt_odds, now_utc
 
 _STAKE = r"(?:\bbet\b\s*)?(?:\$?(\d{1,7})|\b(all\s*in|everything|it\s*all)\b)\s*(?:bucks?|dollars?)?\s*"
 _BET = re.compile(_STAKE + r"(?:on|for)\s+(.+)$", re.IGNORECASE)
@@ -88,12 +89,24 @@ class Bookie:
     def open_bets(self, chat: str) -> list[dict[str, Any]]:
         return [b for b in self._chat(chat)["bets"] if b["status"] == "open"]
 
-    def open_game_ids(self) -> set[str]:
-        return {b["game_id"] for c in self.book.get("chats", {}).values() for b in c["bets"] if b["status"] == "open"}
+    def _all_open(self) -> list[dict[str, Any]]:
+        return [b for c in self.book.get("chats", {}).values() for b in c["bets"] if b["status"] == "open"]
 
-    def open_weeks(self) -> set[tuple[int, int]]:
-        return {(b["week"], b["season_type"]) for c in self.book.get("chats", {}).values()
-                for b in c["bets"] if b["status"] == "open"}
+    def open_game_ids(self) -> set[str]:
+        return {b["game_id"] for b in self._all_open()}
+
+    def open_fetches(self) -> set[tuple[str, str]]:
+        """What to fetch to settle open bets: (league, 'w<week>:<season type>') or (league, 'd<YYYYMMDD>')."""
+        out = set()
+        for b in self._all_open():
+            lg = b.get("league", "nfl")
+            out.add((lg, f"w{b['week']}:{b['season_type']}") if LEAGUES[lg][2] == "week" else (lg, f"d{b['date']}"))
+        return out
+
+    def waiting_on_results(self) -> bool:
+        """An open bet whose game should have started: poll more often until it settles."""
+        now = now_utc().isoformat()
+        return any(b["start"] <= now for b in self._all_open())
 
     def leaderboard(self, chat: str) -> list[dict[str, Any]]:
         players = self._chat(chat)["players"].values()
@@ -118,7 +131,8 @@ class Bookie:
         if amount > p["bucks"]:
             return "too_much"
         c = self._chat(chat)
-        bet = {"id": c["next_id"], "who": who, "name": name, "game_id": game.id, "week": game.week,
+        bet = {"id": c["next_id"], "who": who, "name": name, "game_id": game.key, "league": game.league,
+               "date": et_date(game.start), "week": game.week,
                "season_type": game.season_type, "team": team, "team_name": side.name,
                "opp_name": game.other(team).name, "odds": side.moneyline, "stake": amount,
                "to_win": american_profit(amount, side.moneyline), "start": game.start.isoformat(),
@@ -131,7 +145,7 @@ class Bookie:
 
     def settle(self, games: list[Game]) -> dict[str, list[Settled]]:
         """Pay out bets on finished games. Returns what changed, per chat."""
-        done = {g.id: g for g in games if g.completed}
+        done = {g.key: g for g in games if g.completed}
         out: dict[str, list[Settled]] = {}
         for chat, c in self.book.get("chats", {}).items():
             for b in c["bets"]:
@@ -173,5 +187,7 @@ class Bookie:
 
 def odds_line(g: Game) -> str:
     when = g.start.astimezone().strftime("%a %-I:%M%p").lower()
+    if g.league != "nfl":
+        when = f"{LEAGUES[g.league][1]}, {when}"
     return (f"{g.away.name} {fmt_odds(g.away.moneyline)} @ {g.home.name} {fmt_odds(g.home.moneyline)}"
             f"  ({when}{', ' + g.spread if g.spread else ''})")

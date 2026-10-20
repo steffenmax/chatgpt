@@ -1,4 +1,6 @@
-"""NFL scores, scoring plays and odds from ESPN's public site API (no key, no account).
+"""Scores, scoring plays and odds from ESPN's public site API (no key, no account).
+
+Leagues: NFL, college football, NBA, WNBA, NHL, MLB, men's college basketball.
 
 Used by the sports alerts (alerts.py) and the bookie (bookie.py). Read-only: nothing
 from the chat is ever sent to ESPN; requests are just "this week's scoreboard" and
@@ -7,18 +9,44 @@ from the chat is ever sent to ESPN; requests are just "this week's scoreboard" a
 
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from typing import Any
 
 import httpx
 
-SCOREBOARD = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard"
-SUMMARY = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/summary"
+BASE = "https://site.api.espn.com/apis/site/v2/sports"
+SCOREBOARD = f"{BASE}/football/nfl/scoreboard"
+SUMMARY = f"{BASE}/football/nfl/summary"
+
+# key -> (ESPN path, label, "week" = scoreboard is a week of games, "day" = one date per request)
+LEAGUES = {
+    "nfl": ("football/nfl", "NFL", "week"),
+    "cfb": ("football/college-football", "college football", "week"),
+    "nba": ("basketball/nba", "NBA", "day"),
+    "wnba": ("basketball/wnba", "WNBA", "day"),
+    "nhl": ("hockey/nhl", "NHL", "day"),
+    "mlb": ("baseball/mlb", "MLB", "day"),
+    "cbb": ("basketball/mens-college-basketball", "college basketball", "day"),
+}
+# Words that pick a league: "/bet 50 nhl jets", "/odds nba".
+LEAGUE_WORDS = {
+    "nfl": "nfl", "football": "nfl", "cfb": "cfb", "ncaaf": "cfb", "college football": "cfb",
+    "nba": "nba", "basketball": "nba", "wnba": "wnba", "nhl": "nhl", "hockey": "nhl",
+    "mlb": "mlb", "baseball": "mlb", "cbb": "cbb", "ncaab": "cbb", "college basketball": "cbb",
+}
 
 # Nicknames people actually type, on top of ESPN's names (location, nickname, abbreviation).
 EXTRA_ALIASES = {
+    # NBA / NHL / MLB (keys are "league:ABBR"; plain keys are NFL)
+    "nba:NY": ["knicks", "knickerbockers", "the garden"], "nba:BKN": ["nets"], "nba:PHI": ["sixers", "76ers"],
+    "nba:BOS": ["celtics", "cs"], "nba:LAL": ["lakers", "lebron"], "nba:GS": ["dubs", "warriors"],
+    "nhl:NYR": ["blueshirts", "rangers"], "nhl:NYI": ["isles", "islanders"], "nhl:NJ": ["devils"],
+    "nhl:PHI": ["flyers"], "mlb:NYY": ["yanks", "bronx bombers", "yankees"], "mlb:NYM": ["amazins", "mets"],
+    "mlb:PHI": ["phils", "phillies"], "mlb:BOS": ["sox", "red sox"],
     "NYG": ["big blue", "g men", "gmen", "g-men", "jints"],
     "NYJ": ["gang green", "jest", "j-e-t-s"],
     "NE": ["pats", "new england", "patsies"],
@@ -42,6 +70,9 @@ EXTRA_ALIASES = {
     "PIT": ["steelers", "pitt"],
     "HOU": ["texans", "houston"],
 }
+
+
+ET = ZoneInfo("America/New_York")
 
 
 def american_profit(stake: int, odds: int | None) -> int:
@@ -88,6 +119,12 @@ class Game:
     spread: str = ""  # "HOU -10"
     total: float | None = None
     completed: bool = False
+    league: str = "nfl"
+
+    @property
+    def key(self) -> str:
+        """Unique across leagues."""
+        return f"{self.league}:{self.id}"
 
     def team(self, abbr: str) -> Team | None:
         return self.home if self.home.abbr == abbr else self.away if self.away.abbr == abbr else None
@@ -110,7 +147,7 @@ class Game:
         return self.home.abbr if self.home.score > self.away.score else self.away.abbr
 
 
-def parse_scoreboard(data: dict[str, Any]) -> list[Game]:
+def parse_scoreboard(data: dict[str, Any], league: str = "nfl") -> list[Game]:
     week = int(((data.get("week") or {}).get("number")) or 0)
     season_type = int(((data.get("season") or {}).get("type")) or 2)
     games = []
@@ -138,7 +175,7 @@ def parse_scoreboard(data: dict[str, Any]) -> list[Game]:
                 clock=str(st.get("displayClock") or ""),
                 home=teams["home"], away=teams["away"], week=week, season_type=season_type,
                 spread=str(odds.get("details") or ""), total=odds.get("overUnder"),
-                completed=bool(typ.get("completed")),
+                completed=bool(typ.get("completed")), league=league,
             ))
         except (KeyError, IndexError, ValueError, TypeError):
             continue
@@ -176,33 +213,59 @@ def quarter(period: int) -> str:
 
 
 class ESPN:
-    def __init__(self, timeout: float = 15.0, client: httpx.AsyncClient | None = None):
+    def __init__(self, timeout: float = 15.0, client: httpx.AsyncClient | None = None, clock=None):
         self._client = client or httpx.AsyncClient(timeout=timeout, headers={"User-Agent": "imessage-agent"})
+        self._clock = clock or now_utc
 
     async def aclose(self) -> None:
         await self._client.aclose()
 
-    async def scoreboard(self, week: int | None = None, season_type: int | None = None) -> list[Game]:
-        params = {}
+    async def scoreboard(self, week: int | None = None, season_type: int | None = None, league: str = "nfl",
+                         date: str | None = None) -> list[Game]:
+        params: dict[str, Any] = {}
         if week:
             params = {"week": week, "seasontype": season_type or 2}
-        r = await self._client.get(SCOREBOARD, params=params)
+        elif date:
+            params = {"dates": date}
+        r = await self._client.get(f"{BASE}/{LEAGUES[league][0]}/scoreboard", params=params)
         r.raise_for_status()
-        return parse_scoreboard(r.json())
+        return parse_scoreboard(r.json(), league)
 
-    async def upcoming(self) -> list[Game]:
-        """This week's games, plus next week's once this week is all finished (for betting)."""
-        games = await self.scoreboard()
-        if games and all(g.state == "post" for g in games):
-            nxt = await self.scoreboard(games[0].week + 1, games[0].season_type)
-            if nxt:
-                return nxt
-        return games
+    async def upcoming(self, league: str = "nfl") -> list[Game]:
+        """Games to bet on: this week's (the next week's once it's all done), or today through two days out."""
+        if LEAGUES[league][2] == "week":
+            games = await self.scoreboard(league=league)
+            if games and all(g.state == "post" for g in games):
+                nxt = await self.scoreboard(games[0].week + 1, games[0].season_type, league=league)
+                if nxt:
+                    return nxt
+            return games
+        days = [(self._clock().astimezone(ET) + timedelta(days=d)).strftime("%Y%m%d") for d in range(3)]
+        boards = await asyncio.gather(*(self.scoreboard(league=league, date=d) for d in days), return_exceptions=True)
+        return [g for b in boards if isinstance(b, list) for g in b]
 
-    async def scoring_plays(self, game_id: str) -> list[ScoringPlay]:
-        r = await self._client.get(SUMMARY, params={"event": game_id})
+    async def upcoming_all(self, leagues: list[str] | None = None) -> list[Game]:
+        leagues = leagues or list(LEAGUES)
+        boards = await asyncio.gather(*(self.upcoming(lg) for lg in leagues), return_exceptions=True)
+        return [g for b in boards if isinstance(b, list) for g in b]
+
+    async def scoring_plays(self, game_id: str, league: str = "nfl") -> list[ScoringPlay]:
+        r = await self._client.get(f"{BASE}/{LEAGUES[league][0]}/summary", params={"event": game_id})
         r.raise_for_status()
         return parse_scoring_plays(r.json())
+
+
+def et_date(dt: datetime) -> str:
+    """The ESPN 'dates=' value for a game (US Eastern calendar day)."""
+    return dt.astimezone(ET).strftime("%Y%m%d")
+
+
+def league_hint(text: str) -> str | None:
+    t = " " + re.sub(r"[^a-z ]", " ", (text or "").lower()) + " "
+    for word in sorted(LEAGUE_WORDS, key=len, reverse=True):
+        if f" {word} " in t:
+            return LEAGUE_WORDS[word]
+    return None
 
 
 # Abbreviations that are everyday words ("no", "ten", "min") don't count as team names.
@@ -211,31 +274,35 @@ _COMMON_WORDS = {"no", "car", "den", "min", "sea", "ten", "was", "ind", "la", "n
 
 @dataclass
 class TeamIndex:
-    """Find a team from what people type ('the jets', 'big blue', 'pats')."""
+    """Find a team from what people type ('the jets', 'big blue', 'knicks'). Teams are (league, abbr)."""
 
-    aliases: dict[str, str] = field(default_factory=dict)
+    aliases: dict[str, set[tuple[str, str]]] = field(default_factory=dict)
 
     @classmethod
     def from_games(cls, games: list[Game]) -> "TeamIndex":
-        seen: dict[str, set[str]] = {}
+        idx = cls()
         for g in games:
             for t in (g.home, g.away):
-                for a in (t.abbr, t.name, t.full, t.full.rsplit(" ", 1)[0], *EXTRA_ALIASES.get(t.abbr, [])):
+                extra = EXTRA_ALIASES.get(f"{g.league}:{t.abbr}", []) + (EXTRA_ALIASES.get(t.abbr, []) if g.league == "nfl" else [])
+                for a in (t.abbr, t.name, t.full, t.full.rsplit(" ", 1)[0], *extra):
                     a = a.lower().strip()
                     if a and a not in _COMMON_WORDS:
-                        seen.setdefault(a, set()).add(t.abbr)
-        # "new york" or "los angeles" could be two teams: only keep names that point at one
-        return cls({a: next(iter(t)) for a, t in seen.items() if len(t) == 1})
+                        idx.aliases.setdefault(a, set()).add((g.league, t.abbr))
+        return idx
 
-    def find(self, text: str) -> str | None:
+    def candidates(self, text: str) -> set[tuple[str, str]]:
+        """Every team the longest matching name could mean ('jets' -> NFL and NHL Jets)."""
         t = " " + re.sub(r"[^a-z0-9 -]", " ", (text or "").lower()) + " "
-        best = None
-        for alias, abbr in self.aliases.items():
-            if len(alias) < 2:
-                continue
-            if f" {alias} " in t and (best is None or len(alias) > len(best[0])):
-                best = (alias, abbr)
-        return best[1] if best else None
+        best: tuple[str, set[tuple[str, str]]] | None = None
+        for alias, teams in self.aliases.items():
+            if len(alias) >= 2 and f" {alias} " in t and (best is None or len(alias) > len(best[0])):
+                best = (alias, teams)
+        return set(best[1]) if best else set()
+
+    def find(self, text: str) -> tuple[str, str] | None:
+        """The one team the text means, or None (no match, or several teams/leagues)."""
+        c = self.candidates(text)
+        return next(iter(c)) if len(c) == 1 else None
 
 
 def now_utc() -> datetime:

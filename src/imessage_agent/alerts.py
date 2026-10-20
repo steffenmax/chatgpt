@@ -51,13 +51,15 @@ class SportsAlerts:
                  on_alert: Callable[[Alert], Awaitable[None]] | None = None,
                  on_games: Callable[[list[Game]], Awaitable[None]] | None = None,
                  watch_extra: Callable[[], set[str]] | None = None,
+                 busy: Callable[[], bool] | None = None,
                  field_goals: bool = True):
         self.espn = espn
         self.teams = teams
         self.path = Path(state_path).expanduser()
         self.on_alert = on_alert
         self.on_games = on_games  # e.g. the bookie settling finished games
-        self.watch_extra = watch_extra or (lambda: set())  # game ids with open bets
+        self.watch_extra = watch_extra or (lambda: set())  # game keys with open bets
+        self.busy = busy or (lambda: False)  # e.g. bets waiting on a result in another league
         self.field_goals = field_goals
         self.state: dict[str, dict[str, Any]] = self._load()
         self.last_error: str | None = None
@@ -157,9 +159,11 @@ class SportsAlerts:
     # -- loop --
     def next_wait(self, games: list[Game]) -> float:
         watched = self.watch_extra()
-        live = [g for g in games if (self.followed(g) or g.id in watched)]
+        live = [g for g in games if (self.followed(g) or g.key in watched)]
         if any(g.state == "in" for g in live):
             return 45.0
+        if self.busy():
+            return 120.0
         soon = [g for g in live if g.state == "pre" and g.start - now_utc() < timedelta(minutes=20)]
         return 60.0 if soon else 600.0
 

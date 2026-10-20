@@ -32,11 +32,16 @@ def board(games):
 class FakeESPN:
     def __init__(self, games, plays=None):
         self.games, self.plays = games, plays or {}
+        self.fetched = []
 
-    async def scoreboard(self, week=None, season_type=None):
-        return list(self.games)
+    async def scoreboard(self, week=None, season_type=None, league="nfl", date=None):
+        self.fetched.append((league, week, date))
+        return [g for g in self.games if g.league == league]
 
-    async def upcoming(self):
+    async def upcoming(self, league="nfl"):
+        return [g for g in self.games if g.league == league]
+
+    async def upcoming_all(self, leagues=None):
         return list(self.games)
 
     async def scoring_plays(self, gid):
@@ -52,7 +57,8 @@ def test_scoreboard_parsing_odds_and_payouts():
     assert g.matchup == "Giants @ Texans" and g.home.moneyline == -535 and g.away.moneyline == 400 and g.spread == "HOU -10"
     assert american_profit(100, 400) == 400 and american_profit(535, -535) == 100 and american_profit(50, None) == 50
     idx = TeamIndex.from_games([game(), game("g2", ("PHI", "Eagles", "Philadelphia Eagles", -150), ("NYJ", "Jets", "New York Jets", 130))])
-    assert idx.find("big blue") == "NYG" and idx.find("the jets") == "NYJ" and idx.find("birds") == "PHI" and idx.find("new york") is None
+    assert idx.find("big blue") == ("nfl", "NYG") and idx.find("the jets") == ("nfl", "NYJ") and idx.find("birds") == ("nfl", "PHI")
+    assert idx.find("new york") is None
     assert parse_teams("NYG=Max, Joe;NYJ=Chris Oddo") == {"NYG": ["Max", "Joe"], "NYJ": ["Chris Oddo"]}
     assert parse_bet("ricky 50 on the jets") == (50, "the jets") and parse_bet("ricky all in on pats!") == ("all", "pats")
     assert parse_bet("ricky bet 20 bucks on big blue") == (20, "big blue") and parse_bet("ricky who's on first") is None
@@ -115,7 +121,7 @@ def test_book_places_settles_and_bails_out(tmp_path):
     all_in = b.place(ALLOWED, "+2", "Joe", g, "HOU", "all")
     assert all_in["stake"] == 1000 and all_in["to_win"] == 186
     assert b.place(ALLOWED, "+3", "Tom", game(state="in"), "NYG", 10) == "started"
-    assert b.open_game_ids() == {"g1"}
+    assert b.open_game_ids() == {"nfl:g1"}
     res = b.settle([game(state="post", as_=24, hs=10, completed=True)])[ALLOWED]
     assert [(r.name, r.result, r.delta, r.balance) for r in res] == [("Max", "won", 400, 1400), ("Joe", "lost", -1000, 0)]
     assert b.settle([game(state="post", as_=24, hs=10, completed=True)]) == {}  # once
@@ -142,15 +148,15 @@ def _agent(clock, games, tmp_path, llm_reply="giants fans eating good tonight"):
 async def test_betting_in_the_chat(clock, tmp_path):
     agent, bb, llm = _agent(clock, [game()], tmp_path)
     assert await agent.process(message("coco 100 on big blue", guid="b1")) == "handled:bet"
-    assert bb.texts[-1][1].startswith("locked: Max 100 on the Giants (+400) vs the Texans, pays 400. 900 left.")
+    assert bb.texts[-1][1].startswith("locked: Max 100 on the Giants (+400) vs the Texans ") and "pays 400. 900 left." in bb.texts[-1][1]
     await agent.process(message("/bet 50 texans", guid="b2"))
     assert "betting against your own team. cold blooded" in bb.texts[-1][1]
     await agent.process(message("/bets", guid="b3"))
     assert bb.texts[-1][1] == "riding:\nMax 100 on Giants (+400) to win 400\nMax 50 on Texans (-535) to win 9"
     await agent.process(message("/odds", guid="b4"))
-    assert bb.texts[-1][1].startswith("week 7 lines (moneyline):\nGiants +400 @ Texans -535")
+    assert bb.texts[-1][1].startswith("NFL lines (moneyline):\nGiants +400 @ Texans -535")
     await agent.process(message("/bet 50 dolphins", guid="b5"))
-    assert bb.texts[-1][1] == "who? i don't have them on the board this week"
+    assert bb.texts[-1][1] == "who? i don't have them on the board"
     await agent.on_games([game(state="post", as_=24, hs=10, completed=True)])
     msg = bb.texts[-1][1]
     assert msg.startswith("💰 book settled:\n✅ Max +400 on the Giants → 1350\n❌ Max -50 on the Texans → 1350")
@@ -179,3 +185,39 @@ def test_fan_lookup_handles_two_chrises(clock, tmp_path):
     agent.sports_fans = {"NYG": ["Max Steffen", "Chris Schiavello"], "NYJ": ["Chris Oddo"], "NE": ["Dziuba"]}
     assert agent._fan_of("Chris Oddo") == "NYJ" and agent._fan_of("Chris Schiavello") == "NYG"
     assert agent._fan_of("Chris") is None and agent._fan_of("Max") == "NYG" and agent._fan_of("Dziuba") == "NE"
+
+
+
+def nba(gid="n1", state="pre", hs=0, as_=0, completed=False):
+    g = game(gid, ("NY", "Knicks", "New York Knicks", -180), ("PHI", "76ers", "Philadelphia 76ers", 150), state=state,
+             hs=hs, as_=as_, completed=completed, start=NOW + timedelta(hours=3))
+    g.league = "nba"
+    return g
+
+
+def nhl_jets():
+    g = game("h1", ("STL", "Blues", "St. Louis Blues", -135), ("WPG", "Jets", "Winnipeg Jets", 114))
+    g.league = "nhl"
+    return g
+
+
+async def test_bets_across_leagues(clock, tmp_path):
+    nyj = game("g5", ("NYJ", "Jets", "New York Jets", -238), ("MIA", "Dolphins", "Miami Dolphins", 195))
+    sfg = game("m1", ("SF", "Giants", "San Francisco Giants", 120), ("LAD", "Dodgers", "Los Angeles Dodgers", -140))
+    sfg.league = "mlb"
+    agent, bb, llm = _agent(clock, [game(), nyj, sfg, nba(), nhl_jets()], tmp_path)
+    await agent.process(message("coco 100 on the knicks", guid="k1"))
+    assert bb.texts[-1][1].startswith("locked: Max 100 on the Knicks (-180) vs the 76ers ")
+    await agent.process(message("/bet 50 jets", guid="k2"))  # NFL and NHL Jets, neither followed here
+    assert bb.texts[-1][1].startswith("which one, NFL or NHL?")
+    await agent.process(message("/bet 50 nhl jets", guid="k3"))
+    assert bb.texts[-1][1].startswith("locked: Max 50 on the Jets (+114) vs the Blues ")
+    await agent.process(message("/bet 20 giants", guid="k4"))  # NFL Giants are followed: no question
+    assert bb.texts[-1][1].startswith("locked: Max 20 on the Giants (+400) vs the Texans ")
+    await agent.process(message("/odds nba", guid="k5"))
+    assert bb.texts[-1][1].startswith("NBA lines (moneyline):\n76ers +150 @ Knicks -180") and "(NBA, " in bb.texts[-1][1]
+    # the Knicks game ends: settled from that day's NBA scoreboard
+    agent.espn.games = [nba(state="post", hs=112, as_=99, completed=True)]
+    await agent.on_games([])
+    assert any(f[0] == "nba" and f[2] for f in agent.espn.fetched)
+    assert "✅ Max +55 on the Knicks" in bb.texts[-1][1]

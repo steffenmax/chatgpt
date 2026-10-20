@@ -59,7 +59,7 @@ from .logsafe import exc_name, log_event
 from .alerts import Alert
 from .bookie import Bookie, odds_line, parse_bet
 from .media import GifSearch, TweetFinder, clean_query, describe_tweet, gif_from_reaction
-from .sports import ESPN, Game, TeamIndex, fmt_odds
+from .sports import ESPN, LEAGUES, Game, TeamIndex, fmt_odds, league_hint
 from .memory import MemoryStore
 from .reminders import MAX_DAYS_AHEAD, Reminder, ReminderStore, describe, parse
 from .task import TaskRunner
@@ -1164,55 +1164,91 @@ class Agent:
             await self._say(chat_guid, "riding:\n" + "\n".join(
                 f"{b['name']} {b['stake']} on {b['team_name']} ({fmt_odds(b['odds'])}) to win {b['to_win']}" for b in bets))
             return
+        hint = league_hint(arg)
+        if kind == "odds" and not arg.strip():
+            hint = "nfl"
         try:
-            games = await self.espn.upcoming()  # type: ignore[union-attr]
+            games = await (self.espn.upcoming(hint) if hint else self.espn.upcoming_all())  # type: ignore[union-attr]
         except Exception as exc:  # noqa: BLE001
             log_event("bookie.odds_failed", error=exc_name(exc))
             await self._say(chat_guid, "can't reach the lines right now, try in a bit", remember=False)
             return
         idx = TeamIndex.from_games(games)
         if kind == "odds":
-            team = idx.find(arg) if arg.strip() else None
-            pre = [g for g in games if g.state == "pre" and (team is None or g.team(team))]
-            if not pre:
-                await self._say(chat_guid, "no games on the board right now", remember=False)
+            team = self._pick_team(idx, arg) if arg.strip() and idx.candidates(arg) else None
+            if isinstance(team, str):
+                await self._say(chat_guid, team, remember=False)
                 return
-            await self._say(chat_guid, f"week {pre[0].week} lines (moneyline):\n" + "\n".join(odds_line(g) for g in pre[:16]))
+            pre = sorted((g for g in games if g.state == "pre" and (team is None or (g.league == team[0] and g.team(team[1])))),
+                         key=lambda g: g.start)
+            if team is not None:
+                pre = pre[:1]
+            if not pre:
+                await self._say(chat_guid, "nothing on the board for that right now", remember=False)
+                return
+            title = f"{LEAGUES[pre[0].league][1]} lines (moneyline)" if team is None else "next game"
+            more = "\n(/odds nba, nhl, mlb, cfb, cbb, wnba, or a team)" if not arg.strip() else ""
+            await self._say(chat_guid, f"{title}:\n" + "\n".join(odds_line(g) for g in pre[:16]) + more)
             return
         parsed = parse_bet(arg) or parse_bet(arg, loose=True)
         if parsed is None:
             await self._say(chat_guid, "how much on who? like: /bet 50 jets", remember=False)
             return
         stake, team_text = parsed
-        team = idx.find(team_text)
-        game = next((g for g in games if team and g.team(team)), None)
-        if team is None or game is None:
-            await self._say(chat_guid, "who? i don't have them on the board this week", remember=False)
+        team = self._pick_team(idx, team_text)
+        if isinstance(team, str):
+            await self._say(chat_guid, team, remember=False)
             return
-        bet = book.place(chat_guid, who, name, game, team, stake)
+        upcoming = sorted((g for g in games if team and g.league == team[0] and g.team(team[1])), key=lambda g: g.start)
+        game = next((g for g in upcoming if g.state == "pre"), upcoming[0] if upcoming else None)
+        if team is None or game is None:
+            await self._say(chat_guid, "who? i don't have them on the board", remember=False)
+            return
+        bet = book.place(chat_guid, who, name, game, team[1], stake)
         if isinstance(bet, str):
-            msg = {"started": f"{game.matchup} already kicked off, book's closed on it",
+            msg = {"started": f"{game.matchup} already started, book's closed on it",
                    "too_much": f"you've got {book.balance(chat_guid, who, name)} bucks, relax",
                    "broke": "you're broke. /bailout if you've got no shame",
                    "zero": "bet something real"}.get(bet, "can't take that one")
             await self._say(chat_guid, msg, remember=False)
             return
         quip = random.choice(BET_QUIPS)
-        if self._fan_of(name) and self._fan_of(name) == game.other(team).abbr:
+        fan = self._fan_of(name)
+        if fan and game.league == "nfl" and fan == game.other(team[1]).abbr:
             quip = "betting against your own team. cold blooded"
+        when = game.start.astimezone().strftime("%a %-I:%M%p").lower()
         await self._say(chat_guid, f"locked: {name} {bet['stake']} on the {bet['team_name']} ({fmt_odds(bet['odds'])}) vs the "
-                        f"{bet['opp_name']}, pays {bet['to_win']}. {book.balance(chat_guid, who, name)} left. {quip}")
+                        f"{bet['opp_name']} {when}, pays {bet['to_win']}. {book.balance(chat_guid, who, name)} left. {quip}")
         log_event("bookie.bet", chat_guid=chat_guid, count=bet["stake"])
 
+    def _pick_team(self, idx: TeamIndex, text: str) -> tuple[str, str] | str | None:
+        """(league, abbr) for what someone typed; a question back if it could be several teams."""
+        c = idx.candidates(text)
+        hint = league_hint(text)
+        if hint:
+            c = {t for t in c if t[0] == hint}
+        if len(c) > 1:
+            followed = {t for t in c if t[0] == "nfl" and t[1] in self.sports_fans}
+            if len(followed) == 1:
+                return followed.pop()
+            leagues = sorted({LEAGUES[t[0]][1] for t in c})
+            if len(leagues) > 1:
+                return f"which one, {' or '.join(leagues)}? say it like /bet 50 {sorted({t[0] for t in c})[0]} {text.strip()}"
+        return next(iter(c)) if len(c) == 1 else None
+
     async def on_games(self, games: list[Game]) -> None:
-        """Every sports poll: settle finished games that have bets on them."""
+        """Every sports poll: settle finished games that have bets on them (any league)."""
         if self.bookie is None:
             return
-        have = {(g.week, g.season_type) for g in games}
+        have = {("nfl", f"w{g.week}:{g.season_type}") for g in games}
         extra = []
-        for week, st in self.bookie.open_weeks() - have:
+        for league, what in self.bookie.open_fetches() - have:
             try:
-                extra += await self.espn.scoreboard(week, st)  # type: ignore[union-attr]
+                if what.startswith("w"):
+                    week, st = what[1:].split(":")
+                    extra += await self.espn.scoreboard(int(week), int(st), league=league)  # type: ignore[union-attr]
+                else:
+                    extra += await self.espn.scoreboard(league=league, date=what[1:])  # type: ignore[union-attr]
             except Exception as exc:  # noqa: BLE001
                 log_event("bookie.settle_fetch_failed", error=exc_name(exc))
         for chat_guid, results in self.bookie.settle(games + extra).items():

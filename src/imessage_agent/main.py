@@ -410,6 +410,7 @@ def _build_agent(settings: Settings) -> Agent:
             espn, fans if settings.sports_alerts else {}, str(data_dir / "sports-state.json"),
             on_alert=agent.on_alert, on_games=agent.on_games if settings.bookie_enabled else None,
             watch_extra=agent.bookie.open_game_ids if agent.bookie is not None else None,
+            busy=agent.bookie.waiting_on_results if agent.bookie is not None else None,
             field_goals=settings.sports_field_goals,
         )
     agent_holder["a"] = agent
