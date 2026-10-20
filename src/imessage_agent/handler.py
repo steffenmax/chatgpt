@@ -469,6 +469,9 @@ class Agent:
             history = self.context.get(chat_guid)
             if not history or history[-1] is not marker or self._muted(chat_guid):
                 return  # someone (or the bot) said something after it, or he's muted
+            if self.s.in_quiet_hours(_local_hour()):
+                log_event("unanswered_gif.skipped", chat_guid=chat_guid, reason="quiet_hours")
+                return
             log_event("trigger", chat_guid=chat_guid, kind="unanswered_gif")
             query = "crickets"
             try:
@@ -1202,6 +1205,10 @@ class Agent:
         self._unanswered.clear()
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
+
+
+def _local_hour() -> int:
+    return datetime.now().hour
 
 
 def _plain(history):

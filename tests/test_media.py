@@ -181,3 +181,33 @@ async def test_no_gif_when_someone_answers_or_off(clock, monkeypatch):
     off, bb2, _ = _agent(clock, llm_reply="crickets")
     await off.process(message("anyone", guid="u4"))
     assert off._unanswered_tasks == {}
+
+
+def test_quiet_hours_parse():
+    s = make_settings(unanswered_gif_quiet_hours="1-9")
+    assert [h for h in range(24) if s.in_quiet_hours(h)] == list(range(1, 9))
+    wrap = make_settings(unanswered_gif_quiet_hours="23-7")
+    assert [h for h in range(24) if wrap.in_quiet_hours(h)] == [0, 1, 2, 3, 4, 5, 6, 23]
+    assert not make_settings().in_quiet_hours(3) and not make_settings(unanswered_gif_quiet_hours="junk").in_quiet_hours(3)
+
+
+async def test_no_unanswered_gif_in_quiet_hours(clock, monkeypatch):
+    import asyncio
+
+    import imessage_agent.handler as h
+
+    agent, bb, llm = _agent(clock, llm_reply="crickets", unanswered_gif_minutes=30, unanswered_gif_quiet_hours="1-9")
+    now = [1000.0]
+    monkeypatch.setattr(h.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(h, "_local_hour", lambda: 4)
+    real_sleep = asyncio.sleep
+
+    async def fast_sleep(sec):
+        now[0] += sec
+        await real_sleep(0)
+
+    monkeypatch.setattr(h.asyncio, "sleep", fast_sleep)
+    await agent.process(message("anyone up", guid="q1"))
+    for _ in range(5):
+        await real_sleep(0)
+    assert bb.attachments == [] and agent._unanswered == {}

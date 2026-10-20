@@ -5,6 +5,8 @@ Every setting is documented in .env.example. Nothing here is persisted anywhere.
 
 from __future__ import annotations
 
+import re
+
 from typing import Annotated, Literal
 from urllib.parse import urlparse
 
@@ -195,6 +197,15 @@ class Settings(BaseSettings):
     # A message nobody (the bot included) answers for this many minutes gets a reaction GIF.
     # Needs GIPHY_API_KEY. 0 = off.
     unanswered_gif_minutes: float = Field(default=0.0, ge=0.0)
+    # Local hours with no unanswered GIFs, "start-end" (e.g. "1-9" = 1:00 to 8:59). Empty = none.
+    unanswered_gif_quiet_hours: str = ""
+
+    def in_quiet_hours(self, hour: int) -> bool:
+        m = re.fullmatch(r"\s*(\d{1,2})\s*-\s*(\d{1,2})\s*", self.unanswered_gif_quiet_hours or "")
+        if not m:
+            return False
+        start, end = int(m.group(1)) % 24, int(m.group(2)) % 24
+        return start <= hour < end if start <= end else (hour >= start or hour < end)  # wraps midnight
 
     # --- dashboard (loopback only, same port as the webhook) ---
     # http://127.0.0.1:PORT/dashboard : health, what the bot can see and connect to,
