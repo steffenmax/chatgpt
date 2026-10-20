@@ -7,7 +7,7 @@ from pathlib import Path
 import hmac
 import sys
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
@@ -25,6 +25,9 @@ from .handler import Agent, SenderResolver
 from .imagegen import OpenAIImageGenerator, ImageQueue, MfluxGenerator
 from .llm import AnthropicBackend, OllamaBackend, TextBackend
 from .logsafe import exc_name, install_logging, log_event
+
+if TYPE_CHECKING:
+    from .xsearch import XSearch
 
 MAX_BODY_BYTES = 1_000_000
 
@@ -62,25 +65,77 @@ def build_cloud(settings: Settings) -> TextBackend | None:
     )
 
 
-def build_brief(settings: Settings) -> CultureBrief | None:
-    if not (settings.brief_enabled and settings.anthropic_api_key):
+def build_x(settings: Settings, brief_path: Path) -> XSearch | None:
+    """X pulls for the brief, or None when the brief doesn't use X."""
+    if not (settings.brief_enabled and settings.x_bearer_token and settings.resolved_brief_source in ("x", "both")):
         return None
-    from .brief import BRIEF_PROMPT  # noqa: F401  (documented prompt lives with the module)
+    from .xsearch import XSearch
 
-    runner = TaskRunner(
-        api_key=settings.anthropic_api_key,
-        model=settings.task_model or settings.anthropic_model,
-        root=str(Path(settings.brief_file or "~/Library/Application Support/imessage-agent/brief.md").expanduser().parent / "brief-work"),
-        max_turns=20,
-        max_budget_usd=settings.brief_max_budget_usd,
-        timeout=600,
-        system_prompt=(
-            "You are a careful researcher. Use web search and web fetch. You cannot run commands or "
-            "contact anyone. Follow the task's output format exactly."
-        ),
+    local_writer = settings.resolved_brief_source == "x" and not settings.anthropic_api_key
+    return XSearch(
+        settings.x_bearer_token,
+        settings.x_query_list(),
+        posts_per_query=settings.x_posts_per_query,
+        lookback_hours=settings.x_lookback_hours,
+        max_usd_per_refresh=settings.x_max_usd_per_refresh,
+        ledger_path=str(brief_path.parent / "x-spend.json"),
+        # the local model's context window is small; the cloud writer can take it all
+        digest_max_chars=10000 if local_writer else 40000,
     )
-    return CultureBrief(settings.brief_file or "~/Library/Application Support/imessage-agent/brief.md",
-                        runner, topics=settings.brief_topics, at=settings.brief_time)
+
+
+def build_brief(settings: Settings) -> CultureBrief | None:
+    if not settings.brief_enabled:
+        return None
+    source = settings.resolved_brief_source
+    if source != "x" and not settings.anthropic_api_key:
+        return None
+    brief_path = Path(settings.brief_file or "~/Library/Application Support/imessage-agent/brief.md").expanduser()
+    x = build_x(settings, brief_path)
+    if x is None and source != "web":
+        return None
+    runner = writer = None
+    if source == "x":
+        writer = _build_brief_writer(settings)
+    else:
+        runner = TaskRunner(
+            api_key=settings.anthropic_api_key,
+            model=settings.task_model or settings.anthropic_model,
+            root=str(brief_path.parent / "brief-work"),
+            max_turns=20,
+            max_budget_usd=settings.brief_max_budget_usd,
+            timeout=600,
+            system_prompt=(
+                "You are a careful researcher. Use web search and web fetch. You cannot run commands or "
+                "contact anyone. Follow the task's output format exactly."
+            ),
+        )
+    return CultureBrief(str(brief_path), runner, topics=settings.brief_topics, at=settings.brief_time,
+                        x=x, source=source, writer=writer)
+
+
+def _build_brief_writer(settings: Settings) -> TextBackend:
+    """source=x: the cloud model writes the brief from the X digest when there's a key, else the local model."""
+    if settings.anthropic_api_key:
+        try:
+            return AnthropicBackend(
+                api_key=settings.anthropic_api_key,
+                model=settings.task_model or settings.anthropic_model,
+                max_tokens=1200,
+                timeout=120,
+            )
+        except ImportError:
+            print("WARNING: ANTHROPIC_API_KEY is set but the `anthropic` package is missing (uv sync --extra cloud); "
+                  "the local model will write the brief.", file=sys.stderr)
+    return OllamaBackend(
+        base_url=settings.ollama_url,
+        model=settings.ollama_model,
+        temperature=0.5,
+        max_tokens=900,
+        timeout=max(settings.ollama_timeout_seconds, 300),
+        keep_alive=settings.ollama_keep_alive,
+        num_ctx=max(settings.ollama_num_ctx, 8192),
+    )
 
 
 def create_app(settings: Settings | None = None, agent: Agent | None = None) -> FastAPI:
@@ -134,6 +189,7 @@ def create_app(settings: Settings | None = None, agent: Agent | None = None) -> 
                 reminder_task.cancel()
             if brief_task is not None:
                 brief_task.cancel()
+                await ag.brief.aclose()
             if ag.images is not None:
                 await ag.images.stop()
             await ag.stop_task()
@@ -204,6 +260,7 @@ def create_app(settings: Settings | None = None, agent: Agent | None = None) -> 
             "vision_enabled": ag.vision is not None,
             "task_enabled": ag.tasks is not None,
             "brief_enabled": ag.brief is not None,
+            "brief_source": ag.brief.source if ag.brief is not None else None,
             "image_backend": settings.image_backend if ag.images else None,
             "image_queue": ag.images.qsize() if ag.images else None,
             "chats_with_context": ag.context.chat_count(),

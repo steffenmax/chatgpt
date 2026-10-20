@@ -188,7 +188,25 @@ With `DASHBOARD_ENABLED=true`, open <http://127.0.0.1:8765/dashboard> (your `POR
 
 ## Daily culture brief
 
-With `BRIEF_ENABLED=true`, every morning at `BRIEF_TIME` the task agent searches the web (generic prompt, no chat content) for what's trending and being joked about in `BRIEF_TOPICS`, and writes 10 to 15 one-line references. They're added to the bot's prompt for up to three days with an instruction to use them only when they fit. View, edit or refresh it from the dashboard. Costs a few cents a day.
+With `BRIEF_ENABLED=true`, every morning at `BRIEF_TIME` the bot rebuilds a list of 10 to 15 one-line references to what's trending and being joked about in `BRIEF_TOPICS`. They're added to the bot's prompt for up to three days with an instruction to use them only when they fit. View, edit or refresh it from the dashboard.
+
+Where it comes from (`BRIEF_SOURCE`, default `auto`):
+
+| Source | What happens | Needs | Cost |
+|---|---|---|---|
+| `web` | The task agent searches the web with a generic prompt (no chat content) | `ANTHROPIC_API_KEY` | a few cents a day |
+| `x` | Each topic becomes one X recent search; the most-engaged posts of the last `X_LOOKBACK_HOURS` are written up by the cloud model, or by the local Ollama model if there's no Anthropic key | `X_BEARER_TOKEN` | X credits only: $0.005 per post, about $0.53 a day with the defaults |
+| `both` | The X posts are handed to the task agent as grounding and it web-searches to fill in context | both keys | both of the above |
+
+`auto` picks `both` when both keys are set, `x` with only an X token, `web` with only an Anthropic key.
+
+**X setup.** Create a project and app at <https://developer.x.com>, buy or use your pay-per-use credits, and copy the app's **Bearer Token** into `X_BEARER_TOKEN`. X bills per post returned, so each query asks for exactly `X_POSTS_PER_QUERY` posts and a refresh never requests more than `X_MAX_USD_PER_REFRESH` worth. The default topics map to seven hand-tuned queries; your own `BRIEF_TOPICS` are split into one search per `;`-separated item (a parenthesised list becomes an OR group), or set `X_QUERIES` to write the searches yourself. Nothing from the chats is ever sent to X. Check before spending:
+
+```bash
+uv run imessage-agent brief --plan
+```
+
+prints the exact queries and the estimated cost per refresh. `brief --pull` runs the pulls once and prints the post digest (costs one refresh's worth); plain `brief` does a full refresh and writes the file. The dashboard shows the estimated spend since the first pull, kept in `x-spend.json` next to the brief file. Your X Developer Console balance is the truth.
 
 ## CLI
 
@@ -200,6 +218,7 @@ With `BRIEF_ENABLED=true`, every morning at `BRIEF_TIME` the task agent searches
 | `imessage-agent register-webhook [--replace]` | Create the BlueBubbles webhook for `new-message` |
 | `imessage-agent send --chat <guid> "text"` | Send a test message |
 | `imessage-agent health` | Query `GET /health` on the running server |
+| `imessage-agent brief [--plan\|--pull]` | Refresh the culture brief now; `--plan` previews the X queries and cost, `--pull` fetches the posts and prints them |
 
 `GET http://127.0.0.1:8765/health` returns status, BlueBubbles/Ollama reachability, backend name, cloud flag, image queue length, and how many chats currently hold context.
 
@@ -216,6 +235,7 @@ With `BRIEF_ENABLED=true`, every morning at `BRIEF_TIME` the task agent searches
 | `/task` requests (`TASK_ENABLED`) | Sent with recent context to api.anthropic.com; notes the agent writes stay in `TASK_DIR` (0700) for 14 days; agent session transcripts deleted after each task | 14 days | Yes, request and context |
 | Image prompts with `IMAGE_BACKEND=openai` | Sent to api.openai.com for that one request | OpenAI's retention | Yes, the prompt only |
 | Pending reminders (`REMINDERS_FILE`, off by default) | One JSON file, 0600 | Until they fire or are cancelled | No |
+| Culture brief X pulls (`X_BEARER_TOKEN`) | Search queries from config go to api.x.com; the returned public posts stay in RAM, the written brief is a 0600 file, and `x-spend.json` holds counts and dollars only | Brief: until the next refresh; spend ledger: until you delete it | Yes, the configured queries only, never chat content |
 | Image prompts | RAM; a `0600` temp file in a `0700` temp dir for the duration of one mflux run | Deleted when the job finishes | No, ever |
 | Generated images | Temp dir until sent, then sent through BlueBubbles to iMessage | Deleted right after sending | Only to the chat that asked |
 | Bot replies | Sent through BlueBubbles; kept in RAM context like any other message | As above | Only to the chat |

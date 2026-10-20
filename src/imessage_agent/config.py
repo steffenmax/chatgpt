@@ -139,6 +139,19 @@ class Settings(BaseSettings):
     brief_topics: str = ""
     brief_file: str = ""
     brief_max_budget_usd: float = Field(default=0.5, gt=0, le=5)
+    # Where the brief comes from. auto = X pulls when X_BEARER_TOKEN is set (plus web
+    # search when there is an Anthropic key), else the web. See resolved_brief_source.
+    brief_source: Literal["auto", "web", "x", "both"] = "auto"
+
+    # --- X (Twitter) API pulls for the brief (OFF until X_BEARER_TOKEN is set) ---
+    # Pay-per-use: $0.005 per post returned. Each query asks for exactly X_POSTS_PER_QUERY
+    # posts and a refresh never requests more than X_MAX_USD_PER_REFRESH worth.
+    x_bearer_token: str = ""
+    # One search per ';'-separated item. Empty = derived from BRIEF_TOPICS.
+    x_queries: str = ""
+    x_posts_per_query: int = Field(default=15, ge=10, le=100)
+    x_lookback_hours: int = Field(default=48, ge=1, le=168)
+    x_max_usd_per_refresh: float = Field(default=0.75, gt=0, le=20)
 
     # --- dashboard (loopback only, same port as the webhook) ---
     # http://127.0.0.1:PORT/dashboard : health, what the bot can see and connect to,
@@ -187,6 +200,25 @@ class Settings(BaseSettings):
     def persona(self) -> str:
         return self.bot_persona.replace("{bot_name}", self.bot_name)
 
+    @property
+    def resolved_brief_source(self) -> str:
+        """BRIEF_SOURCE with 'auto' resolved: web / x / both."""
+        if self.brief_source != "auto":
+            return self.brief_source
+        if not self.x_bearer_token:
+            return "web"
+        return "both" if self.anthropic_api_key else "x"
+
+    @property
+    def brief_uses_anthropic(self) -> bool:
+        src = self.resolved_brief_source
+        return self.brief_enabled and (src != "x" or bool(self.anthropic_api_key))
+
+    def x_query_list(self) -> list[str]:
+        from .xsearch import parse_queries, topics_to_queries
+
+        return parse_queries(self.x_queries) or topics_to_queries(self.brief_topics)
+
     def outbound_hosts(self) -> list[tuple[str, str]]:
         """Every (purpose, host) the running app may open a connection to."""
         hosts = [
@@ -199,8 +231,10 @@ class Settings(BaseSettings):
             hosts.append(("Anthropic API (fact lookups)", "api.anthropic.com:443"))
         if self.image_enabled and self.image_backend == "openai":
             hosts.append(("OpenAI API (image generation)", "api.openai.com:443"))
-        if self.brief_enabled and not self.task_enabled:
+        if self.brief_uses_anthropic and not self.task_enabled:
             hosts.append(("Anthropic API (daily brief)", "api.anthropic.com:443"))
+        if self.brief_enabled and self.resolved_brief_source in ("x", "both"):
+            hosts.append(("X API (brief post pulls)", "api.x.com:443"))
         if self.task_enabled:
             hosts.append(("Anthropic API (/task agent)", "api.anthropic.com:443"))
             hosts.append(("Web pages fetched during /task", "any website:443"))
@@ -223,8 +257,15 @@ class Settings(BaseSettings):
             problems.append("CLOUD_LLM_ENABLED=true but ANTHROPIC_API_KEY is empty.")
         if self.cloud_facts_enabled and not self.anthropic_api_key:
             problems.append("CLOUD_FACTS_ENABLED=true but ANTHROPIC_API_KEY is empty.")
-        if self.brief_enabled and not self.anthropic_api_key:
-            problems.append("BRIEF_ENABLED=true but ANTHROPIC_API_KEY is empty.")
+        if self.brief_enabled and not self.anthropic_api_key and self.resolved_brief_source != "x":
+            problems.append(
+                "BRIEF_ENABLED=true but ANTHROPIC_API_KEY is empty (set it, or set X_BEARER_TOKEN "
+                "and BRIEF_SOURCE=x to build the brief from X with the local model)."
+            )
+        if self.brief_enabled and self.resolved_brief_source in ("x", "both") and not self.x_bearer_token:
+            problems.append(f"BRIEF_SOURCE={self.brief_source} but X_BEARER_TOKEN is empty.")
+        if self.brief_enabled and self.x_bearer_token and self.x_posts_per_query * 0.005 > self.x_max_usd_per_refresh:
+            problems.append("X_MAX_USD_PER_REFRESH is too low for even one query of X_POSTS_PER_QUERY posts.")
         if self.task_enabled and not self.anthropic_api_key:
             problems.append("TASK_ENABLED=true but ANTHROPIC_API_KEY is empty.")
         if self.task_enabled and not self.task_chat_guids:

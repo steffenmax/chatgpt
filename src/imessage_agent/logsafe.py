@@ -33,6 +33,12 @@ SAFE_KEYS = frozenset(
         "error",  # exception class name only, never str(exc)
         "host",
         "purpose",
+        # daily brief / X pulls: counts and dollars only, never post text or queries
+        "source",
+        "posts",
+        "queries_ok",
+        "queries_failed",
+        "errors",
         "model",
         "backend",
         "duration_ms",

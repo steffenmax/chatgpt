@@ -77,7 +77,7 @@ async def cmd_check(s: Settings, args) -> int:
     for line in egress_report(s):
         print(line)
     for purpose, host in s.outbound_hosts():
-        if not is_loopback_host(host) and not purpose.startswith(("Anthropic API", "OpenAI API", "Web pages fetched")):
+        if not is_loopback_host(host) and not purpose.startswith(("Anthropic API", "OpenAI API", "X API", "Web pages fetched")):
             print(f"!! {purpose} is not on loopback ({host}); message content would leave this Mac.")
             ok = False
     print()
@@ -138,8 +138,71 @@ async def cmd_check(s: Settings, args) -> int:
             print(f"mflux: {'found at ' + path if path else 'NOT found (uv tool install mflux); /image will be disabled'}")
     else:
         print("mflux: image generation disabled")
+    if s.brief_enabled:
+        print(_brief_plan_line(s))
     print("\nRESULT:", "OK" if ok else "problems found")
     return 0 if ok else 1
+
+
+def _brief_plan_line(s: Settings) -> str:
+    src = s.resolved_brief_source
+    if src == "web":
+        return f"brief: source=web (task agent web search, up to ${s.brief_max_budget_usd:.2f} per refresh)"
+    from .xsearch import POST_READ_USD, XSearch
+
+    x = XSearch(s.x_bearer_token, s.x_query_list(), s.x_posts_per_query, s.x_lookback_hours, s.x_max_usd_per_refresh)
+    plan = x.plan()
+    per = x.estimate_usd()
+    writer = "cloud model" if s.anthropic_api_key else f"local model {s.ollama_model}"
+    how = f"written by the {writer}" if src == "x" else f"+ task agent web search (up to ${s.brief_max_budget_usd:.2f})"
+    dropped = len(x.queries) - len(plan)
+    note = f"; {dropped} quer{'y' if dropped == 1 else 'ies'} dropped to fit X_MAX_USD_PER_REFRESH" if dropped else ""
+    return (f"brief: source={src}, {how}. X: {len(plan)} queries × {plan[0][1] if plan else 0} posts "
+            f"≈ ${per:.2f} per refresh (${POST_READ_USD}/post), ≈ ${per * 30:.2f}/month daily{note}")
+
+
+async def cmd_brief(s: Settings, args) -> int:
+    """Plan, pull or fully refresh the brief from the command line."""
+    if not s.brief_enabled:
+        print("BRIEF_ENABLED is false; nothing to do.")
+        return 1
+    src = s.resolved_brief_source
+    print(_brief_plan_line(s))
+    if src != "web":
+        from .xsearch import XSearch, full_query
+
+        x = XSearch(s.x_bearer_token, s.x_query_list(), s.x_posts_per_query, s.x_lookback_hours, s.x_max_usd_per_refresh)
+        for q, n in x.plan():
+            print(f"  {n:3d} posts  {full_query(q)}")
+        await x.aclose()
+    if args.plan:
+        return 0
+    from .main import build_brief
+
+    brief = build_brief(s)
+    if brief is None:
+        print("brief: not configured (see `imessage-agent check`).")
+        return 1
+    try:
+        if args.pull:
+            if brief.x is None:
+                print("brief: source=web has nothing to pull.")
+                return 1
+            res = await brief.x.pull()
+            print(f"\npulled {res.posts} posts from {res.queries_ok} queries ({res.queries_failed} failed"
+                  f"{': ' + ', '.join(res.errors) if res.errors else ''}), est. ${res.cost_usd:.2f}, {res.duration_ms} ms\n")
+            print(res.digest or "(no posts)")
+            return 0 if res.posts else 1
+        print("\nrefreshing…")
+        ok = await brief.refresh()
+        if ok:
+            print(f"updated {brief.path} (est. ${brief.last_cost_usd:.2f})\n")
+            print(brief.raw())
+            return 0
+        print(f"failed: {brief.last_error}")
+        return 1
+    finally:
+        await brief.aclose()
 
 
 async def cmd_health(s: Settings, args) -> int:
@@ -171,6 +234,9 @@ def main(argv: list[str] | None = None) -> int:
     wp.add_argument("--replace", action="store_true", help="delete other webhooks pointing at this path first")
     sub.add_parser("check", help="print outbound hosts and test local services")
     sub.add_parser("health", help="query the running server's /health")
+    bp = sub.add_parser("brief", help="refresh the daily culture brief now (writes BRIEF_FILE)")
+    bp.add_argument("--plan", action="store_true", help="only print the X queries and cost estimate; no network")
+    bp.add_argument("--pull", action="store_true", help="pull the X posts and print the digest; don't write the brief")
 
     args = p.parse_args(argv)
     s = Settings()
@@ -182,6 +248,7 @@ def main(argv: list[str] | None = None) -> int:
         "register-webhook": cmd_register_webhook,
         "check": cmd_check,
         "health": cmd_health,
+        "brief": cmd_brief,
     }[args.cmd]
     try:
         return asyncio.run(fn(s, args))

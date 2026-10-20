@@ -153,7 +153,8 @@ def build_router(settings: Settings) -> APIRouter:
         age = ag.brief.age_hours()
         return {"text": ag.brief.raw(), "age_hours": None if age is None else round(age, 1),
                 "in_prompt": bool(ag.brief.load()), "topics": ag.brief.topics, "at": ag.brief.at,
-                "last_error": ag.brief.last_error, "refreshing": ag.brief._lock.locked()}
+                "last_error": ag.brief.last_error, "refreshing": ag.brief._lock.locked(),
+                **ag.brief.status()}
 
     @r.put("/api/brief")
     async def put_brief(request: Request):
@@ -176,7 +177,7 @@ def build_router(settings: Settings) -> APIRouter:
         if ag.brief._lock.locked():
             return {"ok": False, "detail": "already refreshing"}
         asyncio.create_task(ag.brief.refresh())
-        return {"ok": True, "detail": "refreshing, takes a minute or two"}
+        return {"ok": True, "detail": "refreshing, takes a minute or two" if ag.brief.source != "x" else "refreshing, under a minute"}
 
     @r.get("/api/events")
     async def events(n: int = 200):

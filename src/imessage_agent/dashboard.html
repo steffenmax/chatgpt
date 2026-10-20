@@ -123,7 +123,9 @@ async function loadBrief(force) {
   const r = await fetch("/dashboard/api/brief"); if (!r.ok) { $("briefsec").hidden = true; return; }
   const d = await r.json(); $("briefsec").hidden = false;
   const age = d.age_hours == null ? "never generated" : (d.age_hours < 1 ? "updated just now" : `updated ${Math.round(d.age_hours)}h ago`);
-  $("briefmeta").textContent = `(${age}, daily at ${d.at}${d.in_prompt ? ", in Ricky's prompt" : ", not in prompt: missing or older than 3 days"}${d.refreshing ? ", refreshing…" : ""}${d.last_error ? ", last attempt failed: " + d.last_error : ""})`;
+  const src = {web: "web search", x: `X pulls, written by ${d.writer || "the model"}`, both: "X pulls + web search"}[d.source] || d.source;
+  const x = d.x ? `, X: ${d.x.queries} queries × ${d.x.posts_per_query} posts ≈ $${d.x.est_usd_per_refresh.toFixed(2)} per refresh, est. $${Number(d.x.spent_usd).toFixed(2)} spent since ${d.x.spent_since ? d.x.spent_since.slice(0, 10) : "never"}` : "";
+  $("briefmeta").textContent = `(${age}, daily at ${d.at}, source: ${src}${x}${d.in_prompt ? ", in Ricky's prompt" : ", not in prompt: missing or older than 3 days"}${d.refreshing ? ", refreshing…" : ""}${d.last_error ? ", last attempt failed: " + d.last_error : ""})`;
   if (force || !briefDirty) { $("brieftext").value = d.text; briefDirty = false; }
 }
 $("brieftext").addEventListener("input", () => briefDirty = true);
