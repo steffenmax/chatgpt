@@ -48,6 +48,7 @@ from .llm import (
     reaction_addendum,
     speaker_names,
     stop_sequences,
+    strip_fake_notes,
     strip_unseen_urls,
     target_nudge,
     trim_reply,
@@ -1186,6 +1187,12 @@ class Agent:
         await self._say_in_voice(job.chat_guid, fact, text)
 
     async def _say(self, chat_guid: str, text: str, remember: bool = True) -> None:
+        cleaned = strip_fake_notes(text)
+        if cleaned != text:
+            log_event("reply.fake_note_removed", chat_guid=chat_guid)
+            text = cleaned
+        if not text:
+            return
         await self.bb.send_text(chat_guid, text)
         log_event("message.sent", chat_guid=chat_guid, chars=len(text))
         if remember:

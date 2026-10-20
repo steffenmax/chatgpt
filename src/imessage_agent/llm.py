@@ -121,7 +121,7 @@ def memory_messages(current_notes: str, history: list[ContextMessage], bot_name:
 
 
 def parse_reaction(text: str) -> str | None:
-    t = _THINK_RE.sub("", text or "").strip().strip('"').strip("'").strip()
+    t = strip_fake_notes(_THINK_RE.sub("", text or "")).strip().strip('"').strip("'").strip()
     if not t or t.upper().startswith("NONE") or "\n" in t or len(t) > 90 or len(t.split()) > 12:
         return None
     if re.match(r"^\s*\w+\s*:", t) or is_refusal(t):
@@ -299,8 +299,23 @@ def build_messages(persona: str, bot_name: str, history: list[ContextMessage]) -
 
 SELF_ONLY_RULE = (
     "\n\nWrite only your own next message. Never write lines for anyone else in the chat, never "
-    "start with a name and a colon, and never post links you haven't seen in the chat."
+    "start with a name and a colon, and never post links you haven't seen in the chat. Notes in square "
+    "brackets like [link: ...], [photo: ...], [sent a picture: ...] or [sent a gif: ...] are added by the "
+    "system to describe what happened; never write one yourself. Writing one doesn't send anything."
 )
+
+# The bracketed notes the system adds to context; the model sometimes writes its own fake ones
+# ("[sent a picture: ...]", a made-up "[link: ...]"). They're cut from anything it says.
+_FAKE_NOTE = re.compile(
+    r"\[\s*(?:link|photo|picture|image|video|gif|tweet|thumbnail|sent (?:a |an )?(?:picture|pic|photo|image|gif|tweet|link|video))"
+    r"\s*:[^\]]*(?:\]|$)",
+    re.IGNORECASE,
+)
+
+
+def strip_fake_notes(text: str) -> str:
+    out = _FAKE_NOTE.sub(" ", text or "")
+    return re.sub(r"[ \t]{2,}", " ", out).strip()
 
 # Added to every chat reply: replies used to contradict earlier ones and grow to paragraphs.
 CONSISTENCY_RULE = (
@@ -444,7 +459,7 @@ def clean_reply(text: str, bot_name: str) -> str:
     prefix = f"{bot_name}:"
     if text.lower().startswith(prefix.lower()):
         text = text[len(prefix):].strip()
-    return text.strip().strip('"').strip()
+    return strip_fake_notes(text).strip().strip('"').strip()
 
 
 class TextBackend(Protocol):

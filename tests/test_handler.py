@@ -786,3 +786,17 @@ async def test_reply_names_the_ping_even_when_newer_messages_follow(clock):
     await asyncio.sleep(0.2)
     await agent.drain()
     assert 'You\'re answering Alex, who said to you: "coco wings or pizza tonight". Answer that.' in llm.systems[-1]
+
+
+async def test_fake_system_notes_never_reach_the_chat(agent_parts):
+    from imessage_agent.llm import strip_fake_notes
+
+    s, bb, llm, ctx, agent = agent_parts
+    llm.reply_text = "i'll get dirty joe, promise not to get uncomfortable\n\n[sent a picture: a racy celebrity photo]"
+    await agent.process(message("coco say something", guid="fn1"))
+    assert bb.texts[-1][1] == "i'll get dirty joe, promise not to get uncomfortable"
+    llm.reply_text = '[link: The Onion page: "Area Man Does Thing"]'
+    await agent.process(message("coco again", guid="fn2"))
+    assert "[link" not in bb.texts[-1][1] and "Onion" not in bb.texts[-1][1]
+    assert strip_fake_notes("knicks [in 5] lol") == "knicks [in 5] lol"  # ordinary brackets stay
+    assert strip_fake_notes("lol [sent a gif: dancing") == "lol"  # unterminated
