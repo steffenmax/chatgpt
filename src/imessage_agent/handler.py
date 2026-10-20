@@ -158,6 +158,7 @@ class Agent:
         # inline reply to one counts as talking to the bot, and a message right after one
         # gets a judgment call.
         self._bot_guids: OrderedDict[str, float] = OrderedDict()
+        self._not_bot_guids: OrderedDict[str, None] = OrderedDict()
         self._last_reaction: dict[str, float] = {}
         self._last_reaction_text: dict[str, str] = {}
         self._last_roast: dict[str, str] = {}
@@ -228,7 +229,7 @@ class Agent:
         # threadOriginatorGuid is a real inline reply. replyToGuid is only the previous message
         # in the chat, so a message right after the bot's is a maybe: judged below.
         thread = data.get("threadOriginatorGuid")
-        is_reply_to_bot = trigger.kind == "none" and isinstance(thread, str) and thread in self._bot_guids
+        is_reply_to_bot = trigger.kind == "none" and isinstance(thread, str) and await self._is_bot_message(thread)
         prev = data.get("replyToGuid")
         follows_bot = (trigger.kind == "none" and not is_reply_to_bot and isinstance(prev, str)
                        and time.monotonic() - self._bot_guids.get(prev, -1e9) < FOLLOWUP_WINDOW_SECONDS)
@@ -333,6 +334,25 @@ class Agent:
         return f"handled:{trigger.kind}"
 
     # ---------------------------------------------------------------- handlers
+    async def _is_bot_message(self, guid: str) -> bool:
+        """Is this message the bot's own? Asks BlueBubbles for ones sent before the last restart."""
+        if guid in self._bot_guids:
+            return True
+        if guid in self._not_bot_guids:
+            return False
+        try:
+            mine = bool((await self.bb.get_message(guid)).get("isFromMe"))
+        except Exception as exc:  # noqa: BLE001
+            log_event("reply.lookup_failed", error=exc_name(exc))
+            return False
+        if mine:
+            self._bot_guids[guid] = 0.0  # old: counts for inline replies, not for the follow-up window
+        else:
+            self._not_bot_guids[guid] = None
+            while len(self._not_bot_guids) > 500:
+                self._not_bot_guids.popitem(last=False)
+        return mine
+
     async def _said_to_bot(self, chat_guid: str) -> bool:
         """Judgment call on a message that came right after the bot's, without its name."""
         history = self.context.get(chat_guid)

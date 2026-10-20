@@ -29,6 +29,13 @@ class FakeBB:
         self.attachments.append((chat_guid, file_path, file_path.read_bytes()))
         return {"guid": "sent-att"}
 
+    async def get_message(self, guid):
+        # messages BlueBubbles knows about; the bot's own have isFromMe
+        msg = getattr(self, "known_messages", {}).get(guid)
+        if msg is None:
+            raise RuntimeError("not found")
+        return msg
+
     async def ping(self):
         return True
 

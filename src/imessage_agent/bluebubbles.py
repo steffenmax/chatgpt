@@ -114,6 +114,10 @@ class BlueBubblesClient:
         r = await self._client.post("/api/v1/chat/query", params=self._params(), json=payload)
         return self._unwrap(r) or []
 
+    async def get_message(self, message_guid: str) -> dict[str, Any]:
+        r = await self._client.get(f"/api/v1/message/{message_guid}", params=self._params())
+        return self._unwrap(r) or {}
+
     async def get_chat(self, chat_guid: str) -> dict[str, Any]:
         r = await self._client.get(f"/api/v1/chat/{chat_guid}", params=self._params(**{"with": "participants"}))
         return self._unwrap(r) or {}

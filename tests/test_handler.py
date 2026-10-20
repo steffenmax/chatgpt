@@ -760,3 +760,16 @@ async def test_dm_messages_are_always_for_the_bot(clock):
                   resolver=SenderResolver(None, {}, use_contacts=False))
     assert await agent.process(message("what are you doing tonight", chat=dm, guid="dm1")) == "handled:mention"
     assert bb.texts == [(dm, "sup")]
+
+
+async def test_inline_reply_to_a_bot_message_from_before_a_restart(agent_parts):
+    s, bb, llm, ctx, agent = agent_parts
+    bb.known_messages = {"old-bot": {"guid": "old-bot", "isFromMe": True}, "old-person": {"guid": "old-person", "isFromMe": False}}
+    assert await agent.process(message("why though", guid="o1", threadOriginatorGuid="old-bot")) == "handled:mention"
+    assert await agent.process(message("facts", guid="o2", threadOriginatorGuid="old-person")) == "stored"
+    assert await agent.process(message("hm", guid="o3", threadOriginatorGuid="gone")) == "stored"  # lookup failed
+    # the old message counts for inline replies but doesn't open the 30s follow-up window
+    llm.reply_text = '{"to": "bot"}'
+    calls = len(llm.calls)
+    assert await agent.process(message("ok", guid="o4", replyToGuid="old-bot")) == "stored"
+    assert len(llm.calls) == calls
