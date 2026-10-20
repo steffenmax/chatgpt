@@ -44,6 +44,26 @@ def _bullet_name(line: str) -> str:
     return m.group(1).strip() if m else ""
 
 
+PINNED = "Pinned"
+
+
+def split_pinned(notes: str) -> tuple[list[str], str]:
+    """(lines under ## Pinned, the notes without that section)."""
+    pinned, rest, inside = [], [], False
+    for line in (notes or "").splitlines():
+        m = re.match(r"^##\s+(.+?)\s*$", line)
+        if m:
+            inside = m.group(1).strip().lower() == PINNED.lower()
+            if inside:
+                continue
+        if inside:
+            if line.strip():
+                pinned.append(line.rstrip())
+        else:
+            rest.append(line)
+    return pinned, "\n".join(rest).strip()
+
+
 def ground_notes(notes: str, members: list[str]) -> str:
     """Enforce the one rule a prompt can't: ## People holds only real senders.
 
@@ -120,12 +140,19 @@ class MemoryStore:
         self._counts[chat_guid] = n
         return n % self.update_every == 0
 
-    async def update(self, chat_guid: str, bot_name: str, history: list[ContextMessage], llm: TextBackend) -> bool:
-        current = self.load(chat_guid)
+    async def update(self, chat_guid: str, bot_name: str, history: list[ContextMessage], llm: TextBackend,
+                     participants: list[str] | None = None) -> bool:
+        """Rewrite the notes from recent messages. ## Pinned (written by the owner) is kept
+        verbatim and never shown to the model as something to rewrite."""
+        pinned, current = split_pinned(self.load(chat_guid))
         members: list[str] = []
         for m in history:
             if not m.from_bot and m.sender and m.sender not in members:
                 members.append(m.sender)
+        # Everyone in the chat counts as a member, not only who spoke in the context window.
+        for name in participants or []:
+            if name and name not in members:
+                members.append(name)
         system = MEMORY_SYSTEM.replace("{bot_name}", bot_name).replace("{max_chars}", str(self.max_chars))
         raw = await llm.reply(system, memory_messages(current, history, bot_name, members))
         notes = (raw or "").strip()
@@ -133,11 +160,14 @@ class MemoryStore:
             notes = notes.strip("`").strip()
             if notes.lower().startswith("markdown"):
                 notes = notes[8:].strip()
+        _, notes = split_pinned(notes)
         notes = ground_notes(notes, members)
         if len(notes) > self.max_chars:
             notes = notes[: self.max_chars].rstrip()
         if not notes or notes.strip() == current.strip():
             return False
+        if pinned:
+            notes = f"## {PINNED}\n" + "\n".join(pinned) + "\n\n" + notes
         self.save(chat_guid, notes)
         log_event("memory.updated", chat_guid=chat_guid, chars=len(notes))
         return True

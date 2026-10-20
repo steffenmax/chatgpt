@@ -53,3 +53,31 @@ async def test_store_update_grounds_model_output(tmp_path):
     notes = st.load("c")
     assert "- Max: dry" in notes.split("## Running bits")[0]
     assert "Doug (not a member, a bit): invented" in notes
+
+
+async def test_pinned_section_survives_rewrites_and_quiet_members_stay(tmp_path):
+    from imessage_agent.context import ContextMessage
+    from imessage_agent.memory import MemoryStore
+
+    class Writer:
+        name = "fake"
+
+        def __init__(self):
+            self.seen = ""
+
+        async def reply(self, system, messages):
+            self.seen = messages[0]["content"]
+            return ("## Pinned\n* Dziuba: actually a genius\n\n## People\n* Max: runs the chat\n"
+                    "* Dziuba: quiet today\n* Doug: made up\n\n## Running bits\n\n## Group\n* lots of NY sports")
+
+    store = MemoryStore(str(tmp_path), 3000, 1)
+    store.save("g", "## Pinned\n* Dziuba: call him Dziuba; the butt of every joke\n\n## People\n* Max: runs the chat\n")
+    w = Writer()
+    history = [ContextMessage("Max", "yo", 0.0)]
+    assert await store.update("g", "Ricky", history, w, participants=["Max", "Dziuba", "Tom Smith"])
+    notes = store.load("g")
+    assert notes.startswith("## Pinned\n* Dziuba: call him Dziuba; the butt of every joke\n\n## People")
+    assert "actually a genius" not in notes and "butt of every joke" not in w.seen  # the model never rewrites it
+    assert "* Dziuba: quiet today" in notes  # in the chat, so still a member
+    assert "Doug (not a member, a bit)" in notes
+    assert "Dziuba, Tom Smith" in w.seen

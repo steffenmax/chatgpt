@@ -150,6 +150,7 @@ class Agent:
         self._last_reaction: dict[str, float] = {}
         self._last_reaction_text: dict[str, str] = {}
         self._last_roast: dict[str, str] = {}
+        self._participants: dict[str, tuple[float, list[str]]] = {}
         self.context = context
         self.images = images
         self.resolver = resolver or SenderResolver(bb, settings.sender_names)
@@ -689,13 +690,34 @@ class Agent:
         if self.memory is not None and self.memory.tick(chat_guid):
             self._spawn(self._update_memory(chat_guid))
 
+    async def _chat_members(self, chat_guid: str) -> list[str]:
+        """Display names of everyone in the chat (cached for an hour); [] if BlueBubbles can't say."""
+        hit = self._participants.get(chat_guid)
+        if hit and time.monotonic() - hit[0] < 3600:
+            return hit[1]
+        names: list[str] = []
+        try:
+            chat = await self.bb.get_chat(chat_guid)
+            for p in chat.get("participants") or []:
+                addr = p.get("address") if isinstance(p, dict) else None
+                if addr:
+                    name = await self.resolver.name_for(addr)
+                    if name and name != addr and name not in names:  # unknown numbers stay out
+                        names.append(name)
+        except Exception as exc:  # noqa: BLE001
+            log_event("chat.members_failed", chat_guid=chat_guid, error=exc_name(exc))
+            return hit[1] if hit else []
+        self._participants[chat_guid] = (time.monotonic(), names)
+        return names
+
     async def _update_memory(self, chat_guid: str) -> None:
         history = self.context.get(chat_guid)
         if not history:
             return
         try:
+            members = await self._chat_members(chat_guid)
             async with self._llm_gate:
-                await self.memory.update(chat_guid, self.s.bot_name, _plain(history), self.llm)  # type: ignore[union-attr]
+                await self.memory.update(chat_guid, self.s.bot_name, _plain(history), self.llm, members)  # type: ignore[union-attr]
         except Exception as exc:  # noqa: BLE001
             log_event("memory.update_failed", chat_guid=chat_guid, error=exc_name(exc))
 
