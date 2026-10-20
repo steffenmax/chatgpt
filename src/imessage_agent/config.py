@@ -156,6 +156,15 @@ class Settings(BaseSettings):
     x_lookback_hours: int = Field(default=48, ge=1, le=168)
     x_max_usd_per_refresh: float = Field(default=0.75, gt=0, le=20)
 
+    # --- links people share (linkreader.py) ---
+    # Open links posted in allowlisted chats and add what's behind them (post text, top
+    # replies, page title and opening text) to the in-memory context. Fetches go out from
+    # this Mac to the linked site; X posts go through api.fxtwitter.com when LINK_X_REPLIES
+    # is on (needed for replies), otherwise X's own embed endpoint (post only).
+    links_enabled: bool = False
+    link_x_replies: bool = True
+    link_max_chars: int = Field(default=900, ge=200, le=3000)
+
     # --- dashboard (loopback only, same port as the webhook) ---
     # http://127.0.0.1:PORT/dashboard : health, what the bot can see and connect to,
     # memory notes (editable), reminders, live events. Off by default.
@@ -238,6 +247,10 @@ class Settings(BaseSettings):
             hosts.append(("Anthropic API (daily brief)", "api.anthropic.com:443"))
         if self.brief_enabled and self.resolved_brief_source in ("x", "both"):
             hosts.append(("X API (brief post pulls)", "api.x.com:443"))
+        if self.links_enabled:
+            hosts.append(("Links shared in allowlisted chats", "any website:443"))
+            hosts.append(("X posts and replies (shared X links)",
+                          "api.fxtwitter.com:443" if self.link_x_replies else "cdn.syndication.twimg.com:443"))
         if self.task_enabled:
             hosts.append(("Anthropic API (/task agent)", "api.anthropic.com:443"))
             hosts.append(("Web pages fetched during /task", "any website:443"))

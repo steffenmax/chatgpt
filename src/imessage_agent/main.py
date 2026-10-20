@@ -18,6 +18,7 @@ from .memory import MemoryStore
 from .reminders import ReminderStore
 from .brief import CultureBrief
 from .task import TaskRunner
+from .linkreader import LinkReader
 from .vision import OllamaVision
 from .context import ContextStore
 from .egress import print_egress_report
@@ -195,6 +196,8 @@ def create_app(settings: Settings | None = None, agent: Agent | None = None) -> 
                 await ag.images.stop()
             await ag.stop_task()
             await ag.drain()
+            if ag.links is not None:
+                await ag.links.aclose()
             ag.context.forget_all()  # context never survives a restart
             if app.state.owns_agent:
                 await ag.bb.aclose()
@@ -259,6 +262,7 @@ def create_app(settings: Settings | None = None, agent: Agent | None = None) -> 
             "memory_enabled": ag.memory is not None,
             "reminders_enabled": ag.reminders is not None,
             "vision_enabled": ag.vision is not None,
+            "links_enabled": ag.links is not None,
             "task_enabled": ag.tasks is not None,
             "brief_enabled": ag.brief is not None,
             "brief_source": ag.brief.source if ag.brief is not None else None,
@@ -331,6 +335,11 @@ def _build_agent(settings: Settings) -> Agent:
                 before = llm.unload
             images = ImageQueue(gen, _send, _fail, before_generate=before, gate=llm_gate)
 
+    vision = (
+        OllamaVision(settings.ollama_url, settings.vision_model, settings.vision_max_width, settings.vision_keep_alive)
+        if settings.vision_model
+        else None
+    )
     agent = Agent(
         settings, bb, llm, context, images,
         resolver=SenderResolver(bb, settings.sender_names),
@@ -340,9 +349,7 @@ def _build_agent(settings: Settings) -> Agent:
         if settings.memory_dir
         else None,
         reminders=ReminderStore(settings.reminders_file) if settings.reminders_file else None,
-        vision=OllamaVision(settings.ollama_url, settings.vision_model, settings.vision_max_width, settings.vision_keep_alive)
-        if settings.vision_model
-        else None,
+        vision=vision,
         tasks=TaskRunner(
             api_key=settings.anthropic_api_key,
             model=settings.task_model or settings.anthropic_model,
@@ -357,6 +364,9 @@ def _build_agent(settings: Settings) -> Agent:
         if settings.task_enabled and settings.anthropic_api_key
         else None,
         brief=build_brief(settings),
+        links=LinkReader(settings.link_x_replies, settings.link_max_chars, vision=vision, gate=llm_gate)
+        if settings.links_enabled
+        else None,
     )
     agent_holder["a"] = agent
     return agent

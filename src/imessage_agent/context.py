@@ -36,14 +36,16 @@ class ContextStore:
         self._chats: dict[str, _ChatContext] = {}
 
     # -- public API --
-    def add(self, chat_guid: str, sender: str, text: str, from_bot: bool = False) -> None:
+    def add(self, chat_guid: str, sender: str, text: str, from_bot: bool = False) -> ContextMessage:
         now = self._clock()
         ctx = self._chats.get(chat_guid)
         if ctx is None or self._expired(ctx, now):
             ctx = _ChatContext(messages=deque(maxlen=self.max_messages), last_activity=now)
             self._chats[chat_guid] = ctx
-        ctx.messages.append(ContextMessage(sender=sender, text=text, ts=now, from_bot=from_bot))
+        msg = ContextMessage(sender=sender, text=text, ts=now, from_bot=from_bot)
+        ctx.messages.append(msg)
         ctx.last_activity = now
+        return msg
 
     def get(self, chat_guid: str) -> list[ContextMessage]:
         ctx = self._chats.get(chat_guid)

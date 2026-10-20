@@ -7,6 +7,7 @@ import random
 import re
 import time
 import uuid
+from dataclasses import replace
 from datetime import datetime, timedelta
 from collections import OrderedDict, deque
 from pathlib import Path
@@ -40,6 +41,7 @@ from .llm import (
     strip_unseen_urls,
 )
 from .llm import OllamaBackend
+from .linkreader import LinkReader, find_urls, strip_cards
 from .logsafe import exc_name, log_event
 from .memory import MemoryStore
 from .reminders import MAX_DAYS_AHEAD, Reminder, ReminderStore, describe, parse
@@ -117,6 +119,7 @@ class Agent:
         vision=None,
         tasks: TaskRunner | None = None,
         brief=None,
+        links: LinkReader | None = None,
     ):
         self.s = settings
         self.bb = bb
@@ -132,6 +135,9 @@ class Agent:
         self.tasks = tasks
         # Optional daily culture brief (CultureBrief), added to the prompt while fresh.
         self.brief = brief
+        # Optional link reader: links people share get a short card of what's behind them.
+        self.links = links
+        self._link_reads: dict[str, set[asyncio.Task]] = {}
         self._task_job: asyncio.Task | None = None
         self._task_chat: str | None = None
         # A question the task agent asked: the next plain message in that chat answers it.
@@ -224,10 +230,15 @@ class Agent:
         address = (data.get("handle") or {}).get("address") if isinstance(data.get("handle"), dict) else None
         sender = await self.resolver.name_for(address)
 
+        stored = None
         if trigger.kind in ("none", "mention"):
-            self.context.add(chat_guid, sender, text)
+            stored = self.context.add(chat_guid, sender, text)
         elif trigger.kind == "ask":
-            self.context.add(chat_guid, sender, trigger.arg or text)
+            stored = self.context.add(chat_guid, sender, trigger.arg or text)
+        if stored is not None and self.links is not None:
+            urls = find_urls(stored.text)
+            if urls:
+                self._read_links(chat_guid, stored, urls)
         if trigger.kind in ("none", "mention", "ask"):
             self._maybe_update_memory(chat_guid)
         if trigger.kind == "none":
@@ -274,6 +285,7 @@ class Agent:
 
     # ---------------------------------------------------------------- handlers
     async def _handle_mention(self, chat_guid: str, force_cloud: bool = False) -> None:
+        await self._links_ready(chat_guid)
         history = self.context.get(chat_guid)
         who = history[-1].sender if history else "someone"
         intent = Intent("lookup") if force_cloud else await self._intent(history)
@@ -352,7 +364,7 @@ class Agent:
         if not history:
             return Intent()
         system = INTENT_SYSTEM.replace("{bot_name}", self.s.bot_name)
-        msgs = intent_messages(history)
+        msgs = intent_messages(_plain(history))
         try:
             async with self._llm_gate:
                 structured = getattr(self.llm, "structured", None)
@@ -363,7 +375,7 @@ class Agent:
         intent = parse_intent(raw)
         if intent.action == "lookup" and self.cloud is None:
             return Intent()
-        if intent.action == "image" and not looks_like_image_request(history[-1].text):
+        if intent.action == "image" and not looks_like_image_request(strip_cards(history[-1].text)):
             log_event("intent.vetoed", kind="image")
             return Intent()
         return intent
@@ -577,6 +589,13 @@ class Agent:
                 "\n\nNotes you keep about this chat and the people in it, from earlier conversations "
                 "(use them naturally, never read them out):\n" + notes
             )
+        if self.links is not None:
+            system += (
+                "\n\nWhen someone shares a link, a [link: ...] note after their message shows what it is: the "
+                "post or page, and for X posts the top replies. React to what's actually in it like you "
+                "opened it yourself, and riff on the replies if they're funny. Don't invent anything that "
+                "isn't in the note, don't read the note out, and if it says you couldn't open it, say so."
+            )
         brief = self.brief.load() if self.brief else ""
         if brief:
             system += (
@@ -585,6 +604,25 @@ class Agent:
                 "one in, never explain the joke, never list these:\n" + brief
             )
         return system
+
+    def _read_links(self, chat_guid: str, msg, urls: list[str]) -> None:
+        async def read():
+            cards = [c for c in await asyncio.gather(*(self.links.read(u) for u in urls)) if c]  # type: ignore[union-attr]
+            if cards:
+                msg.text = msg.text + " " + " ".join(cards)
+
+        t = asyncio.create_task(read())
+        pending = self._link_reads.setdefault(chat_guid, set())
+        pending.add(t)
+        self._tasks.add(t)
+        t.add_done_callback(self._tasks.discard)
+        t.add_done_callback(pending.discard)
+
+    async def _links_ready(self, chat_guid: str, timeout: float = 30.0) -> None:
+        """Wait for links still being read in this chat, so a reply can see them."""
+        pending = list(self._link_reads.get(chat_guid) or ())
+        if pending:
+            await asyncio.wait(pending, timeout=timeout)
 
     def _spawn(self, coro) -> None:
         t = asyncio.create_task(coro)
@@ -639,7 +677,7 @@ class Agent:
             return
         try:
             async with self._llm_gate:
-                await self.memory.update(chat_guid, self.s.bot_name, history, self.llm)  # type: ignore[union-attr]
+                await self.memory.update(chat_guid, self.s.bot_name, _plain(history), self.llm)  # type: ignore[union-attr]
         except Exception as exc:  # noqa: BLE001
             log_event("memory.update_failed", chat_guid=chat_guid, error=exc_name(exc))
 
@@ -734,3 +772,8 @@ class Agent:
     async def drain(self) -> None:
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
+
+
+def _plain(history):
+    """History without link cards, for the tool router and the memory notes."""
+    return [replace(m, text=strip_cards(m.text)) if "[link: " in m.text else m for m in history]
