@@ -49,6 +49,10 @@ class Settings(BaseSettings):
     # tapbacks need the BlueBubbles Private API, so these are plain texts. 0 = off.
     reaction_chance: float = Field(default=0.0, ge=0.0, le=1.0)
     reaction_cooldown_seconds: float = Field(default=300.0, ge=0.0)
+    # Haha tapbacks on one message: at HAHA_ACK_AT different people the bot says something dumb
+    # about it, at HAHA_PRAISE_AT it compliments whoever sent it. 0 = off.
+    haha_ack_at: int = Field(default=0, ge=0)
+    haha_praise_at: int = Field(default=0, ge=0)
     # Per-chat notes the local model keeps about the people and the group, as markdown
     # files on disk. Empty = off (nothing message-derived is ever written to disk).
     memory_dir: str = ""

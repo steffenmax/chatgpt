@@ -170,6 +170,8 @@ class Agent:
         self._last_reaction: dict[str, float] = {}
         self._last_reaction_text: dict[str, str] = {}
         self._last_roast: dict[str, str] = {}
+        # message GUID -> {"chat", "who": addresses that laughed, "fired": milestones already said}
+        self._laughs: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._participants: dict[str, tuple[float, list[str]]] = {}
         # One reply at a time per chat, and mentions waiting to be answered together.
         self._chat_locks: dict[str, asyncio.Lock] = {}
@@ -210,7 +212,9 @@ class Agent:
         if isinstance(guid, str) and guid and guid in self._seen:
             log_event("message.ignored", status="duplicate")
             return "ignored:duplicate"
-        if data.get("associatedMessageType") or data.get("itemType"):
+        if data.get("associatedMessageType"):
+            return self._on_tapback(data)
+        if data.get("itemType"):
             return "ignored:reaction_or_system"
 
         chats = data.get("chats") or []
@@ -366,6 +370,74 @@ class Agent:
             while len(self._not_bot_guids) > 500:
                 self._not_bot_guids.popitem(last=False)
         return mine
+
+    def _on_tapback(self, data: dict[str, Any]) -> str:
+        """Count haha tapbacks per message; say something at HAHA_ACK_AT and HAHA_PRAISE_AT."""
+        kind = str(data.get("associatedMessageType") or "").lower()
+        if kind not in ("laugh", "-laugh", "2003", "3003") or not (self.s.haha_ack_at or self.s.haha_praise_at):
+            return "ignored:reaction_or_system"
+        chats = data.get("chats") or []
+        chat_guid = chats[0].get("guid") if chats and isinstance(chats[0], dict) else None
+        target = re.sub(r"^\w+:\d+/", "", str(data.get("associatedMessageGuid") or ""))
+        who = (data.get("handle") or {}).get("address") if isinstance(data.get("handle"), dict) else None
+        if not chat_guid or chat_guid not in self._allowed or not target or not who:
+            return "ignored:reaction_or_system"
+        st = self._laughs.get(target)
+        if st is None:
+            st = self._laughs[target] = {"chat": chat_guid, "who": set(), "fired": set()}
+            while len(self._laughs) > 500:
+                self._laughs.popitem(last=False)
+        if kind in ("-laugh", "3003"):
+            st["who"].discard(_norm_addr(who))
+            return "tapback:removed"
+        st["who"].add(_norm_addr(who))
+        n = len(st["who"])
+        level = None
+        if self.s.haha_praise_at and n >= self.s.haha_praise_at and "praise" not in st["fired"]:
+            level = "praise"
+        elif self.s.haha_ack_at and n >= self.s.haha_ack_at and not st["fired"]:
+            level = "ack"
+        if level is None or self._muted(chat_guid):
+            return "tapback:counted"
+        st["fired"].add(level)
+        log_event("haha.milestone", chat_guid=chat_guid, kind=level, count=n)
+        self._spawn(self._haha_reply(chat_guid, target, level, n))
+        return f"tapback:{level}"
+
+    async def _haha_reply(self, chat_guid: str, target: str, level: str, n: int) -> None:
+        try:
+            msg = await self.bb.get_message(target)
+        except Exception as exc:  # noqa: BLE001
+            log_event("haha.lookup_failed", chat_guid=chat_guid, error=exc_name(exc))
+            return
+        if msg.get("isFromMe"):
+            return  # the bot's own line got the laughs: no victory lap
+        addr = (msg.get("handle") or {}).get("address") if isinstance(msg.get("handle"), dict) else None
+        st = self._laughs.get(target)
+        if st is not None and addr and _norm_addr(addr) in st["who"]:
+            # laughing at your own message doesn't count
+            n = len(st["who"]) - 1
+            need = self.s.haha_praise_at if level == "praise" else self.s.haha_ack_at
+            if n < need:
+                st["fired"].discard(level)
+                log_event("haha.self_laugh", chat_guid=chat_guid, kind=level)
+                return
+        name = await self.resolver.name_for(addr)
+        said = " ".join(str(msg.get("text") or "").split())[:200] or "(a picture)"
+        if level == "praise":
+            nudge = (f"\n\n{name}'s message \"{said}\" just got a haha from every single person in the chat. That "
+                     f"basically never happens. Give {name} one or two lines of huge, over-the-top, genuine praise for "
+                     "it. Mean it: no roast, no backhanded stuff this time.")
+        else:
+            nudge = (f"\n\n{name}'s message \"{said}\" just got {n} haha reactions. Acknowledge it in one short, "
+                     "dumb line: way too impressed, or a nonsense joke about it.")
+        async with self._chat_lock(chat_guid):
+            if self._muted(chat_guid):
+                return
+            try:
+                await self._reply(chat_guid, self.context.get(chat_guid), use_cloud=False, reason="haha", nudge=nudge)
+            except Exception as exc:  # noqa: BLE001
+                log_event("handler.error", chat_guid=chat_guid, kind="haha", error=exc_name(exc))
 
     async def _said_to_bot(self, chat_guid: str) -> bool:
         """Judgment call on a message that came right after the bot's, without its name."""
