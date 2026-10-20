@@ -627,3 +627,101 @@ async def test_reaction_prompt_varies_and_repeats_are_dropped(clock):
     await agent.process(message("then he fell again", guid="v2"))
     await agent.drain()
     assert bb.texts == [(ALLOWED, "lmaooo")]  # the near-identical second one was dropped
+
+
+class _SysLLM:
+    name = "fake"
+
+    def __init__(self, reply="yo", delay=0.0):
+        self.reply_text, self.delay = reply, delay
+        self.systems: list[str] = []
+
+    async def reply(self, system, messages, stop=None):
+        self.systems.append(system)
+        await asyncio.sleep(self.delay)
+        return self.reply_text
+
+    async def healthy(self):
+        return True
+
+    async def aclose(self):
+        pass
+
+
+def _batch_agent(clock, llm, **over):
+    from imessage_agent.context import ContextStore
+    from tests.conftest import FakeBB, make_settings
+
+    s = make_settings(reply_batch_seconds=0.05, reply_batch_max_seconds=0.5, **over)
+    bb = FakeBB()
+    names = {"+15550001111": "Alex", "+15550002222": "Sam", "+15550003333": "Dan"}
+    agent = Agent(s, bb, llm, ContextStore(30, 3600, clock=clock), images=None,  # type: ignore[arg-type]
+                  resolver=SenderResolver(None, names, use_contacts=False))
+    return agent, bb
+
+
+async def test_mentions_close_together_get_one_reply(clock):
+    llm = _SysLLM("ok ok one at a time")
+    agent, bb = _batch_agent(clock, llm)
+    assert await agent.process(message("coco who wins tonight", guid="b1", sender="+15550001111")) == "queued:mention"
+    await agent.process(message("coco and are you coming sat", guid="b2", sender="+15550002222"))
+    await agent.process(message("lol", guid="b3", sender="+15550003333"))
+    await agent.process(message("coco answer me", guid="b4", sender="+15550003333"))
+    await asyncio.sleep(0.2)
+    await agent.drain()
+    assert bb.texts == [(ALLOWED, "ok ok one at a time")]
+    reply_system = llm.systems[-1]
+    assert "Several people pinged you at once (Alex, Sam, Dan)" in reply_system
+    assert "Stay consistent with what you already said" in reply_system
+
+
+async def test_a_ping_during_a_reply_waits_and_sees_that_reply(clock):
+    llm = _SysLLM("first take", delay=0.2)
+    agent, bb = _batch_agent(clock, llm)
+    await agent.process(message("coco jets or giants", guid="c1"))
+    await asyncio.sleep(0.1)  # batch closed, reply being written
+    await agent.process(message("coco wait what", guid="c2", sender="+15550002222"))
+    await asyncio.sleep(0.8)
+    await agent.drain()
+    assert [t for _, t in bb.texts] == ["first take", "first take"]  # two replies, never overlapping
+    second_history = agent.context.get(ALLOWED)
+    assert [m.text for m in second_history if m.from_bot][:1] == ["first take"]
+
+
+def test_trim_reply_cuts_at_a_sentence():
+    from imessage_agent.llm import trim_reply
+
+    long = "jets in five. " + "dan is cooked and everyone knows it. " * 20
+    out = trim_reply(long, 120)
+    assert len(out) <= 120 and out.endswith(".")
+    assert trim_reply("short", 120) == "short"
+
+
+async def test_mute_silences_the_chat_until_unmuted(clock):
+    llm = _SysLLM("yo")
+    agent, bb = _batch_agent(clock, llm, reaction_chance=1.0, reaction_cooldown_seconds=0)
+    await agent.process(message("coco who wins", guid="m0"))  # queued, then muted before it's answered
+    assert await agent.process(message("coco chill for 10 min", guid="m1")) == "handled:mute"
+    assert bb.texts[-1][1].endswith("10 min")
+    assert await agent.process(message("coco you there", guid="m2")) == "muted"
+    assert await agent.process(message("dan fell off the boat", guid="m3")) == "stored"
+    await asyncio.sleep(0.2)
+    await agent.drain()
+    assert len(bb.texts) == 1 and llm.systems == []  # no reply, no reaction, no queued answer
+    assert await agent.process(message("/unmute", guid="m4")) == "handled:unmute"
+    assert await agent.process(message("coco welcome back", guid="m5")) == "queued:mention"
+    await asyncio.sleep(0.2)
+    await agent.drain()
+    assert bb.texts[-1][1] == "yo"
+
+
+async def test_mute_expires(clock, monkeypatch):
+    import time as _time
+
+    llm = _SysLLM("yo")
+    agent, bb = _batch_agent(clock, llm)
+    await agent.process(message("/mute 5m", guid="e1"))
+    assert agent._muted(ALLOWED)
+    real = _time.monotonic()
+    monkeypatch.setattr("imessage_agent.handler.time.monotonic", lambda: real + 301)
+    assert not agent._muted(ALLOWED)

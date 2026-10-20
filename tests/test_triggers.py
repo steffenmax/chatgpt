@@ -86,3 +86,19 @@ def test_image_request_gate():
     assert not ok("ricky roast joe")
     assert not ok("seriously concerned with this whole doug thing")
 
+
+
+def test_mute_and_unmute_phrases():
+    from imessage_agent.triggers import detect, parse_duration
+
+    for t in ("coco chill", "shut up coco", "yo coco chill bro", "coco stfu lol", "coco, go away", "coco pls be quiet",
+              "/mute", "coco relax for 10 min"):
+        assert detect(t, "coco").kind == "mute", t
+    for t in ("coco that was chill", "coco whats a chill bar near us?", "coco is enough of a clown",
+              "coco chill out and tell me who won the game last night because i missed it"):
+        assert detect(t, "coco").kind == "mention", t
+    for t in ("/unmute", "coco come back", "coco you can talk now"):
+        assert detect(t, "coco").kind == "unmute", t
+    assert parse_duration("coco shut up for an hour") == 3600
+    assert parse_duration("2h") == 7200 and parse_duration("1h30m") == 5400 and parse_duration("half an hour") == 1800
+    assert parse_duration("10 days") == 86400 and parse_duration("coco chill") is None

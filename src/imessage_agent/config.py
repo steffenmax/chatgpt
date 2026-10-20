@@ -38,6 +38,13 @@ class Settings(BaseSettings):
     # A message ending in "?" that nobody answers within this many seconds is treated
     # as addressed to the bot. 0 disables.
     quiet_question_seconds: float = Field(default=0.0, ge=0.0)
+    # Mentions that arrive together are answered in one reply: wait until the chat has
+    # been quiet this long (capped at REPLY_BATCH_MAX_SECONDS after the first ping).
+    # Replies in one chat never overlap either way. 0 = answer each mention at once.
+    reply_batch_seconds: float = Field(default=0.0, ge=0.0, le=30.0)
+    reply_batch_max_seconds: float = Field(default=12.0, ge=0.0, le=60.0)
+    # Soft cap on a reply's length (cut at a sentence end). 0 = no cap.
+    reply_max_chars: int = Field(default=0, ge=0)
     # Occasional short text reactions ("lmaoo", "💀") to ordinary messages. Real iMessage
     # tapbacks need the BlueBubbles Private API, so these are plain texts. 0 = off.
     reaction_chance: float = Field(default=0.0, ge=0.0, le=1.0)

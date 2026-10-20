@@ -246,6 +246,30 @@ SELF_ONLY_RULE = (
     "start with a name and a colon, and never post links you haven't seen in the chat."
 )
 
+# Added to every chat reply: replies used to contradict earlier ones and grow to paragraphs.
+CONSISTENCY_RULE = (
+    "\n\nStay consistent with what you already said in this chat (your earlier lines): don't flip an "
+    "answer, a take or a fact you gave; if you really changed your mind, say so. Don't repeat yourself. "
+    "Keep it short like a text: one to three lines unless someone asked for detail."
+)
+BATCH_NUDGE = (
+    "\n\nSeveral people pinged you at once ({who}). Answer them all in ONE message: a quick line for "
+    "each thing that needs one, skip what doesn't."
+)
+
+
+def trim_reply(text: str, limit: int) -> str:
+    """Cut an overlong reply at the last sentence end before the limit."""
+    if limit <= 0 or len(text) <= limit:
+        return text
+    cut = text[:limit]
+    ends = [cut.rfind(c) for c in (". ", "! ", "? ", "\n")]
+    end = max(ends)
+    if end >= limit // 2:
+        return cut[: end + 1].strip()
+    return cut.rsplit(" ", 1)[0].rstrip(",;:") + "…"
+
+
 _URL = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
 
 

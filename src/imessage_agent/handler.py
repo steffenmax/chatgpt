@@ -23,6 +23,8 @@ from .llm import (
     INTENT_SYSTEM,
     LOOKUP_NOTICES,
     AFTERWORD_SUFFIX,
+    BATCH_NUDGE,
+    CONSISTENCY_RULE,
     REFUSAL_ROASTS,
     SELF_ONLY_RULE,
     afterword_ok,
@@ -41,6 +43,7 @@ from .llm import (
     speaker_names,
     stop_sequences,
     strip_unseen_urls,
+    trim_reply,
 )
 from .llm import OllamaBackend
 from .linkreader import LinkReader, find_urls, strip_cards
@@ -48,7 +51,7 @@ from .logsafe import exc_name, log_event
 from .memory import MemoryStore
 from .reminders import MAX_DAYS_AHEAD, Reminder, ReminderStore, describe, parse
 from .task import TaskRunner
-from .triggers import Trigger, detect, help_text
+from .triggers import DEFAULT_MUTE_SECONDS, Trigger, detect, help_text, parse_duration
 
 NEW_MESSAGE = "new-message"
 
@@ -151,6 +154,11 @@ class Agent:
         self._last_reaction_text: dict[str, str] = {}
         self._last_roast: dict[str, str] = {}
         self._participants: dict[str, tuple[float, list[str]]] = {}
+        # One reply at a time per chat, and mentions waiting to be answered together.
+        self._chat_locks: dict[str, asyncio.Lock] = {}
+        self._pending: dict[str, dict[str, Any]] = {}
+        # "<name> chill" / "/mute 30m": chat -> monotonic time the bot may talk again.
+        self._muted_until: dict[str, float] = {}
         self.context = context
         self.images = images
         self.resolver = resolver or SenderResolver(bb, settings.sender_names)
@@ -247,7 +255,11 @@ class Agent:
                 self._read_links(chat_guid, stored, urls)
         if trigger.kind in ("none", "mention", "ask"):
             self._maybe_update_memory(chat_guid)
+            if chat_guid in self._pending:  # the chat is still going: let it settle before replying
+                self._pending[chat_guid]["last"] = time.monotonic()
         if trigger.kind == "none":
+            if self._muted(chat_guid):
+                return "stored"
             if has_link and self.s.link_quiet_seconds > 0:
                 self._spawn(self._quiet_link(chat_guid, stored))
                 return "stored"
@@ -255,6 +267,9 @@ class Agent:
                 self._maybe_react(chat_guid)
             return "stored"
 
+        if trigger.kind in ("mention", "ask") and self._muted(chat_guid):
+            log_event("trigger", chat_guid=chat_guid, kind=trigger.kind, status="muted")
+            return "muted"
         if is_reply_to_bot:
             log_event("trigger", chat_guid=chat_guid, kind=trigger.kind, reason="reply")
         else:
@@ -275,12 +290,18 @@ class Agent:
                 self.context.forget(chat_guid)
                 log_event("context.forgot", chat_guid=chat_guid)
                 await self._say_in_voice(chat_guid, "done, i wiped everything i had from this chat", "done, wiped everything i had from this chat")
+            elif trigger.kind == "mute":
+                await self._handle_mute(chat_guid, trigger.arg)
+            elif trigger.kind == "unmute":
+                await self._handle_unmute(chat_guid)
             elif trigger.kind == "image":
                 await self._handle_image(chat_guid, trigger.arg)
-            elif trigger.kind == "mention":
-                await self._handle_mention(chat_guid)
-            elif trigger.kind == "ask":
-                await self._handle_mention(chat_guid, force_cloud=True)
+            elif trigger.kind in ("mention", "ask"):
+                if self.s.reply_batch_seconds > 0:
+                    self._queue_mention(chat_guid, stored, sender, force_cloud=trigger.kind == "ask")
+                    return f"queued:{trigger.kind}"
+                async with self._chat_lock(chat_guid):
+                    await self._handle_mention(chat_guid, force_cloud=trigger.kind == "ask", marker=stored)
             elif trigger.kind == "remind":
                 await self._handle_remind(chat_guid, sender, trigger.arg)
             elif trigger.kind == "reminders":
@@ -293,11 +314,83 @@ class Agent:
         return f"handled:{trigger.kind}"
 
     # ---------------------------------------------------------------- handlers
-    async def _handle_mention(self, chat_guid: str, force_cloud: bool = False) -> None:
+    def _muted(self, chat_guid: str) -> bool:
+        until = self._muted_until.get(chat_guid)
+        if until is None:
+            return False
+        if time.monotonic() >= until:
+            self._muted_until.pop(chat_guid, None)
+            log_event("mute.ended", chat_guid=chat_guid)
+            return False
+        return True
+
+    async def _handle_mute(self, chat_guid: str, arg: str) -> None:
+        seconds = parse_duration(arg) or DEFAULT_MUTE_SECONDS
+        self._muted_until[chat_guid] = time.monotonic() + seconds
+        self._pending.pop(chat_guid, None)  # drop pings waiting for a reply
+        log_event("mute.started", chat_guid=chat_guid, duration_ms=seconds * 1000)
+        mins = round(seconds / 60)
+        span = f"{mins} min" if mins < 60 else f"{mins // 60} hr" + (f" {mins % 60} min" if mins % 60 else "")
+        await self._say(chat_guid, random.choice(
+            (f"aight, going quiet for {span}", f"fine. {span} of silence, enjoy it", f"say less. back in {span}")))
+
+    async def _handle_unmute(self, chat_guid: str) -> None:
+        was = self._muted_until.pop(chat_guid, None) is not None
+        log_event("mute.ended", chat_guid=chat_guid, reason="unmute")
+        await self._say(chat_guid, random.choice(("i'm back", "missed me", "back. what'd i miss")) if was else "i wasn't gone")
+
+    def _chat_lock(self, chat_guid: str) -> asyncio.Lock:
+        return self._chat_locks.setdefault(chat_guid, asyncio.Lock())
+
+    def _queue_mention(self, chat_guid: str, marker, sender: str, force_cloud: bool = False) -> None:
+        """Answer mentions that arrive close together in one reply (REPLY_BATCH_SECONDS)."""
+        now = time.monotonic()
+        st = self._pending.get(chat_guid)
+        if st is None:
+            st = self._pending[chat_guid] = {"first": now, "last": now, "marker": marker, "who": [], "n": 0, "cloud": False}
+            self._spawn(self._answer_batch(chat_guid))
+        st["last"], st["marker"] = now, marker
+        st["n"] += 1
+        st["cloud"] = st["cloud"] or force_cloud
+        if sender not in st["who"]:
+            st["who"].append(sender)
+
+    async def _answer_batch(self, chat_guid: str) -> None:
+        async with self._chat_lock(chat_guid):  # wait out a reply still being written
+            while True:
+                st = self._pending.get(chat_guid)
+                if st is None:
+                    return  # muted meanwhile
+                now = time.monotonic()
+                quiet = st["last"] + self.s.reply_batch_seconds - now
+                cap = st["first"] + max(self.s.reply_batch_max_seconds, self.s.reply_batch_seconds) - now
+                wait = min(quiet, cap)
+                if wait <= 0:
+                    break
+                await asyncio.sleep(wait)
+            st = self._pending.pop(chat_guid)
+            if self._muted(chat_guid):
+                return
+            if st["n"] > 1:
+                log_event("mention.batched", chat_guid=chat_guid, count=st["n"])
+            try:
+                await self._handle_mention(chat_guid, force_cloud=st["cloud"], marker=st["marker"],
+                                           pinged_by=st["who"] if st["n"] > 1 else None)
+            except Exception as exc:  # noqa: BLE001
+                log_event("handler.error", chat_guid=chat_guid, kind="mention", error=exc_name(exc))
+
+    async def _handle_mention(self, chat_guid: str, force_cloud: bool = False, marker=None,
+                              pinged_by: list[str] | None = None) -> None:
         await self._links_ready(chat_guid)
         history = self.context.get(chat_guid)
-        who = history[-1].sender if history else "someone"
-        intent = Intent("lookup") if force_cloud else await self._intent(history)
+        # The router looks at the (last) message that pinged the bot, not whatever came after it.
+        upto = history
+        for i in range(len(history) - 1, -1, -1):
+            if history[i] is marker:
+                upto = history[: i + 1]
+                break
+        who = upto[-1].sender if upto else "someone"
+        intent = Intent("lookup") if force_cloud else await self._intent(upto)
         if intent.action == "image" and self.images is not None:
             log_event("intent", chat_guid=chat_guid, kind="image")
             await self._handle_image(chat_guid, intent.prompt)
@@ -311,7 +404,9 @@ class Agent:
             self.context.forget(chat_guid)
             await self._say_in_voice(chat_guid, "done, i wiped everything i had from this chat", "done, wiped everything i had from this chat")
             return
-        await self._reply(chat_guid, history, use_cloud=(intent.action == "lookup"), reason="command" if force_cloud else "intent")
+        nudge = BATCH_NUDGE.replace("{who}", ", ".join(pinged_by)) if pinged_by else ""
+        await self._reply(chat_guid, history, use_cloud=(intent.action == "lookup"),
+                          reason="command" if force_cloud else "intent", nudge=nudge)
 
     async def _reply(self, chat_guid: str, history, use_cloud: bool, reason: str, nudge: str = "") -> None:
         messages = build_messages(self.s.persona, self.s.bot_name, history)
@@ -328,8 +423,8 @@ class Agent:
 
         async def ask(b, sys_prompt):
             if isinstance(b, OllamaBackend):
-                return await b.reply(sys_prompt + SELF_ONLY_RULE, messages, stop=stops)
-            return await b.reply(sys_prompt + SELF_ONLY_RULE, messages)
+                return await b.reply(sys_prompt + CONSISTENCY_RULE + SELF_ONLY_RULE, messages, stop=stops)
+            return await b.reply(sys_prompt + CONSISTENCY_RULE + SELF_ONLY_RULE, messages)
 
         started = time.monotonic()
         async with self._llm_gate:
@@ -370,6 +465,11 @@ class Agent:
             last = self._last_roast.get(chat_guid)
             reply = random.choice([r for r in REFUSAL_ROASTS if r != last])
             self._last_roast[chat_guid] = reply
+        if backend is self.llm and self.s.reply_max_chars:
+            trimmed = trim_reply(reply, self.s.reply_max_chars)
+            if trimmed != reply:
+                log_event("reply.trimmed", chat_guid=chat_guid, chars=len(reply))
+                reply = trimmed
         if not reply:
             reply = "hm, blanked. say that again?"
         await self._say(chat_guid, reply)
@@ -667,7 +767,7 @@ class Agent:
 
     async def _react(self, chat_guid: str) -> None:
         history = self.context.get(chat_guid)
-        if not history or history[-1].from_bot:
+        if not history or history[-1].from_bot or self._muted(chat_guid):
             return
         try:
             async with self._llm_gate:
@@ -724,11 +824,15 @@ class Agent:
     async def _quiet_question(self, chat_guid: str, marker) -> None:
         await asyncio.sleep(self.s.quiet_question_seconds)
         history = self.context.get(chat_guid)
-        if not history or history[-1] is not marker:
-            return  # someone (or the bot) already replied, or the context was wiped
+        if not history or history[-1] is not marker or self._muted(chat_guid):
+            return  # someone (or the bot) already replied, the context was wiped, or he's muted
         log_event("trigger", chat_guid=chat_guid, kind="quiet_question")
+        if self.s.reply_batch_seconds > 0:
+            self._queue_mention(chat_guid, marker, marker.sender)
+            return
         try:
-            await self._handle_mention(chat_guid)
+            async with self._chat_lock(chat_guid):
+                await self._handle_mention(chat_guid, marker=marker)
         except Exception as exc:  # noqa: BLE001
             log_event("handler.error", chat_guid=chat_guid, kind="quiet_question", error=exc_name(exc))
 
@@ -737,16 +841,20 @@ class Agent:
         await asyncio.sleep(self.s.link_quiet_seconds)
         await self._links_ready(chat_guid)
         history = self.context.get(chat_guid)
-        if not history or history[-1] is not marker:
-            return  # someone (or the bot) already said something
+        if not history or history[-1] is not marker or self._muted(chat_guid):
+            return  # someone (or the bot) already said something, or he's muted
         if "[link: " not in marker.text or "[link: couldn't open it]" in marker.text:
             return  # nothing to talk about
         log_event("trigger", chat_guid=chat_guid, kind="quiet_link")
         try:
-            await self._reply(chat_guid, history, use_cloud=False, reason="quiet_link", nudge=(
-                f"\n\n{marker.sender} shared that link a while ago and nobody has said anything. Give your "
-                "own quick take on it, one or two short lines, like you just opened it: the funniest or "
-                "wildest part, a roast, or a reply that caught your eye. Don't ask if anyone saw it."))
+            async with self._chat_lock(chat_guid):
+                history = self.context.get(chat_guid)
+                if not history or history[-1] is not marker:
+                    return  # someone spoke while a reply was being written
+                await self._reply(chat_guid, history, use_cloud=False, reason="quiet_link", nudge=(
+                    f"\n\n{marker.sender} shared that link a while ago and nobody has said anything. Give "
+                    "your own quick take on it, one or two short lines, like you just opened it: the funniest "
+                    "or wildest part, a roast, or a reply that caught your eye. Don't ask if anyone saw it."))
         except Exception as exc:  # noqa: BLE001
             log_event("handler.error", chat_guid=chat_guid, kind="quiet_link", error=exc_name(exc))
 

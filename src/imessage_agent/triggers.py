@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-Kind = Literal["mention", "ask", "image", "help", "forget", "remind", "reminders", "task", "none"]
+Kind = Literal["mention", "ask", "image", "help", "forget", "remind", "reminders", "task", "mute", "unmute", "none"]
 
 
 @dataclass(frozen=True)
@@ -17,8 +17,37 @@ class Trigger:
 
 _COMMANDS = {
     "/image": "image", "/img": "image", "/ask": "ask", "/help": "help", "/forget": "forget",
-    "/remind": "remind", "/reminders": "reminders", "/task": "task",
+    "/remind": "remind", "/reminders": "reminders", "/task": "task", "/mute": "mute", "/unmute": "unmute",
 }
+
+DEFAULT_MUTE_SECONDS = 30 * 60
+MAX_MUTE_SECONDS = 24 * 3600
+# "<name> chill", "<name> shut up for an hour": short messages only, so "ricky what's a chill bar" isn't one.
+_MUTE_WORDS = re.compile(
+    r"\b(chill|chill out|shut up|shut it|stfu|be quiet|quiet|hush|pipe down|zip it|stop talking|go away|"
+    r"take a break|mute|enough|relax|calm down|knock it off)\b", re.IGNORECASE)
+_UNMUTE_WORDS = re.compile(
+    r"\b(unmute|you can talk|you can speak|come back|wake up|you'?re back|talk again|speak again)\b", re.IGNORECASE)
+
+
+_FILLER = re.compile(r"^(?:(?:yo|bro|bruh|dude|man|ok|okay|alright|aight|please|pls|plz|just|can you|could you|"
+                     r"can u|u|you|go|now|ayo)\b[\s,.!]*)+", re.IGNORECASE)
+
+
+def parse_duration(text: str) -> int | None:
+    """Seconds for '30m', '2 hours', 'an hour', 'half an hour', '1h30m'; None if there's no duration."""
+    t = (text or "").lower()
+    if re.search(r"\bhalf an? hour\b", t):
+        return 1800
+    if re.search(r"\b(an|a|one) hour\b", t):
+        return 3600
+    total, found = 0, False
+    for n, unit in re.findall(r"(\d+(?:\.\d+)?)\s*(d|days?|h|hrs?|hours?|m|mins?|minutes?)(?![a-z])", t):
+        found = True
+        total += int(float(n) * (86400 if unit.startswith("d") else 3600 if unit.startswith("h") else 60))
+    if not found:
+        return None
+    return max(60, min(total, MAX_MUTE_SECONDS))
 
 
 def mention_pattern(bot_name: str) -> re.Pattern[str]:
@@ -55,6 +84,15 @@ def detect(text: str | None, bot_name: str) -> Trigger:
     if cmd:
         return Trigger(cmd, arg)  # type: ignore[arg-type]
     if is_mention(text, bot_name):
+        if len(text.split()) <= 9 and "?" not in text:
+            # The ask has to lead what's left once the name is out: "ricky chill", "shut up ricky",
+            # "yo ricky you can talk" - not "ricky that was chill".
+            raw = mention_pattern(bot_name).sub(" ", text).strip(" ,.!-")
+            rests = (raw, _FILLER.sub("", raw).strip())
+            if any(_UNMUTE_WORDS.match(r) for r in rests):
+                return Trigger("unmute", text)
+            if any(_MUTE_WORDS.match(r) for r in rests):
+                return Trigger("mute", text)
         return Trigger("mention", text)
     return Trigger("none")
 
@@ -75,6 +113,7 @@ def help_text(bot_name: str, image_enabled: bool, cloud_facts: bool = False, rem
         lines.append("- /remind in 20m <what>, /remind at 7pm <what>, /remind tomorrow 9am <what> - i'll post it here then")
         lines.append("- /reminders - what's pending, /remind cancel <n> - drop one")
     lines += [
+        f"- \"{bot_name} chill\" or /mute 30m - i'll stay quiet in this chat for a while, /unmute to bring me back",
         "- /forget - wipe what i remember from this chat",
         "- /help - this",
         "i only remember the last few messages here, and forget them after a while anyway.",
