@@ -25,7 +25,6 @@ from .llm import (
     ADDRESSEE_SCHEMA,
     ADDRESSEE_SYSTEM,
     AFTERWORD_SUFFIX,
-    BATCH_NUDGE,
     CONSISTENCY_RULE,
     REFUSAL_ROASTS,
     SELF_ONLY_RULE,
@@ -47,6 +46,7 @@ from .llm import (
     speaker_names,
     stop_sequences,
     strip_unseen_urls,
+    target_nudge,
     trim_reply,
 )
 from .llm import OllamaBackend
@@ -404,13 +404,13 @@ class Agent:
         now = time.monotonic()
         st = self._pending.get(chat_guid)
         if st is None:
-            st = self._pending[chat_guid] = {"first": now, "last": now, "marker": marker, "who": [], "n": 0, "cloud": False}
+            st = self._pending[chat_guid] = {"first": now, "last": now, "marker": marker, "pings": [], "n": 0, "cloud": False}
             self._spawn(self._answer_batch(chat_guid))
         st["last"], st["marker"] = now, marker
         st["n"] += 1
         st["cloud"] = st["cloud"] or force_cloud
-        if sender not in st["who"]:
-            st["who"].append(sender)
+        if marker is not None and all(m is not marker for m in st["pings"]):
+            st["pings"].append(marker)
 
     async def _answer_batch(self, chat_guid: str) -> None:
         async with self._chat_lock(chat_guid):  # wait out a reply still being written
@@ -431,13 +431,12 @@ class Agent:
             if st["n"] > 1:
                 log_event("mention.batched", chat_guid=chat_guid, count=st["n"])
             try:
-                await self._handle_mention(chat_guid, force_cloud=st["cloud"], marker=st["marker"],
-                                           pinged_by=st["who"] if st["n"] > 1 else None)
+                await self._handle_mention(chat_guid, force_cloud=st["cloud"], marker=st["marker"], pings=st["pings"])
             except Exception as exc:  # noqa: BLE001
                 log_event("handler.error", chat_guid=chat_guid, kind="mention", error=exc_name(exc))
 
     async def _handle_mention(self, chat_guid: str, force_cloud: bool = False, marker=None,
-                              pinged_by: list[str] | None = None) -> None:
+                              pings: list | None = None) -> None:
         await self._links_ready(chat_guid)
         history = self.context.get(chat_guid)
         # The router looks at the (last) message that pinged the bot, not whatever came after it.
@@ -461,7 +460,7 @@ class Agent:
             self.context.forget(chat_guid)
             await self._say_in_voice(chat_guid, "done, i wiped everything i had from this chat", "done, wiped everything i had from this chat")
             return
-        nudge = BATCH_NUDGE.replace("{who}", ", ".join(pinged_by)) if pinged_by else ""
+        nudge = target_nudge(pings or ([marker] if marker is not None else []))
         await self._reply(chat_guid, history, use_cloud=(intent.action == "lookup"),
                           reason="command" if force_cloud else "intent", nudge=nudge)
 

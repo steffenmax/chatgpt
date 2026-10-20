@@ -286,10 +286,25 @@ CONSISTENCY_RULE = (
     "answer, a take or a fact you gave; if you really changed your mind, say so. Don't repeat yourself. "
     "Keep it short like a text: one to three lines unless someone asked for detail."
 )
-BATCH_NUDGE = (
-    "\n\nSeveral people pinged you at once ({who}). Answer them all in ONE message: a quick line for "
-    "each thing that needs one, skip what doesn't."
-)
+
+
+def target_nudge(pings: list[ContextMessage]) -> str:
+    """Name the message(s) the bot is answering. In a busy chat the newest line is often someone
+    else's, and a small model answers whatever is newest."""
+    from .linkreader import strip_cards
+
+    def said(m: ContextMessage) -> str:
+        t = " ".join(strip_cards(m.text).split())
+        return t if len(t) <= 200 else t[:200].rsplit(" ", 1)[0] + "…"
+
+    pings = [m for m in pings if not m.from_bot][-4:]
+    if not pings:
+        return ""
+    rest = " The other messages are context: leave other conversations alone unless they're about this."
+    if len(pings) == 1:
+        return f"\n\nYou're answering {pings[0].sender}, who said to you: \"{said(pings[0])}\". Answer that.{rest}"
+    lines = "\n".join(f"- {m.sender}: \"{said(m)}\"" for m in pings)
+    return f"\n\nSeveral people pinged you at once. Answer them in ONE message, a quick line for each:\n{lines}\n{rest.strip()}"
 
 
 def trim_reply(text: str, limit: int) -> str:

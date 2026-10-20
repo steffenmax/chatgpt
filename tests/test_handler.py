@@ -673,7 +673,9 @@ async def test_mentions_close_together_get_one_reply(clock):
     await agent.drain()
     assert bb.texts == [(ALLOWED, "ok ok one at a time")]
     reply_system = llm.systems[-1]
-    assert "Several people pinged you at once (Alex, Sam, Dan)" in reply_system
+    assert "Several people pinged you at once" in reply_system
+    assert '- Alex: "coco who wins tonight"\n- Sam: "coco and are you coming sat"\n- Dan: "coco answer me"' in reply_system
+    assert "lol" not in reply_system.split("Several people")[1]  # only the pings are named
     assert "Stay consistent with what you already said" in reply_system
 
 
@@ -773,3 +775,14 @@ async def test_inline_reply_to_a_bot_message_from_before_a_restart(agent_parts):
     calls = len(llm.calls)
     assert await agent.process(message("ok", guid="o4", replyToGuid="old-bot")) == "stored"
     assert len(llm.calls) == calls
+
+
+
+async def test_reply_names_the_ping_even_when_newer_messages_follow(clock):
+    llm = _SysLLM("pizza obviously")
+    agent, bb = _batch_agent(clock, llm)
+    await agent.process(message("coco wings or pizza tonight", guid="t1"))
+    await agent.process(message("jack you still have my charger", guid="t2", sender="+15550002222"))
+    await asyncio.sleep(0.2)
+    await agent.drain()
+    assert 'You\'re answering Alex, who said to you: "coco wings or pizza tonight". Answer that.' in llm.systems[-1]
