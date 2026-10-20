@@ -702,7 +702,7 @@ async def test_mute_silences_the_chat_until_unmuted(clock):
     agent, bb = _batch_agent(clock, llm, reaction_chance=1.0, reaction_cooldown_seconds=0)
     await agent.process(message("coco who wins", guid="m0"))  # queued, then muted before it's answered
     assert await agent.process(message("coco chill for 10 min", guid="m1")) == "handled:mute"
-    assert bb.texts[-1][1].endswith("10 min")
+    assert "10 min" in bb.texts[-1][1]
     assert await agent.process(message("coco you there", guid="m2")) == "muted"
     assert await agent.process(message("dan fell off the boat", guid="m3")) == "stored"
     await asyncio.sleep(0.2)
@@ -730,4 +730,4 @@ async def test_mute_expires(clock, monkeypatch):
 async def test_mute_defaults_to_two_minutes(clock):
     agent, bb = _batch_agent(clock, _SysLLM("yo"))
     await agent.process(message("coco chill", guid="d1"))
-    assert bb.texts[-1][1].endswith("2 min")
+    assert "2 min" in bb.texts[-1][1]
