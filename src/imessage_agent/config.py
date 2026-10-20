@@ -135,6 +135,8 @@ class Settings(BaseSettings):
     bookie_enabled: bool = False
     bookie_start: int = Field(default=1000, ge=1)
     bookie_bailout: int = Field(default=100, ge=1)
+    # Bets on games already in progress, at live odds (closes in the last two minutes / OT).
+    bookie_live: bool = True
     # Who may start a task and answer its questions (phone numbers / emails as iMessage
     # reports them). Empty = anyone in the task chats.
     task_owner_addresses: Annotated[list[str], NoDecode] = Field(default_factory=list)

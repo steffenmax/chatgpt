@@ -221,3 +221,46 @@ async def test_bets_across_leagues(clock, tmp_path):
     await agent.on_games([])
     assert any(f[0] == "nba" and f[2] for f in agent.espn.fetched)
     assert "✅ Max +55 on the Knicks" in bb.texts[-1][1]
+
+
+def test_live_odds_math_and_cutoff():
+    from imessage_agent.sports import prob_to_american, too_late_to_bet
+
+    assert prob_to_american(0.5) == -111 and prob_to_american(0.1) == 700 and prob_to_american(0.95) < -1000
+    g = nba(state="in")
+    g.period, g.clock = 2, "4:12"
+    assert not too_late_to_bet(g)
+    g.period, g.clock = 4, "1:59"
+    assert too_late_to_bet(g)
+    g.period = 5
+    assert too_late_to_bet(g)
+
+
+async def test_live_bet_uses_live_odds(clock, tmp_path, monkeypatch):
+    import imessage_agent.handler as h
+
+    g = nba(state="in", hs=30, as_=28)
+    g.period, g.clock, g.detail = 2, "4:12", "4:12 - 2nd"
+    agent, bb, llm = _agent(clock, [g], tmp_path)
+
+    async def fake_live(espn, game):
+        return (-105, -125)
+
+    monkeypatch.setattr(h, "live_odds", fake_live)
+    await agent.process(message("coco 125 on the knicks", guid="lv1"))
+    msg = bb.texts[-1][1]
+    assert msg.startswith("locked: Max 125 on the Knicks (-125) vs the 76ers LIVE (4:12 - 2nd, Knicks 30, 76ers 28), pays 100.")
+    assert agent.bookie.open_bets(ALLOWED)[0]["live"] is True
+    await agent.process(message("/odds knicks", guid="lv2"))
+    assert bb.texts[-1][1] == "the line:\n🔴 LIVE 4:12 - 2nd: 76ers 28 -105 @ Knicks 30 -125"
+    g.period, g.clock = 4, "0:40"
+    await agent.process(message("/bet 10 knicks", guid="lv3"))
+    assert bb.texts[-1][1] == "76ers @ Knicks is too far gone, book's closed on it"
+
+    async def no_line(espn, game):
+        return None
+
+    g.period = 3
+    monkeypatch.setattr(h, "live_odds", no_line)
+    await agent.process(message("/bet 10 knicks", guid="lv4"))
+    assert bb.texts[-1][1] == "no live line on that one right now"

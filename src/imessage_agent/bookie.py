@@ -117,10 +117,12 @@ class Bookie:
         return sorted(rows, key=lambda p: p["bucks"] + p["at_risk"], reverse=True) if players else []
 
     # -- writes --
-    def place(self, chat: str, who: str, name: str, game: Game, team: str, stake: int | str) -> dict[str, Any] | str:
-        """The new bet, or a short reason it was refused."""
+    def place(self, chat: str, who: str, name: str, game: Game, team: str, stake: int | str,
+              live: bool = False) -> dict[str, Any] | str:
+        """The new bet, or a short reason it was refused. live: the game is on and its moneylines
+        are the live ones."""
         p = self._player(chat, who, name)
-        if game.state != "pre" or game.start <= now_utc():
+        if game.state == "post" or (not live and (game.state != "pre" or game.start <= now_utc())):
             return "started"
         side = game.team(team)
         if side is None:
@@ -136,7 +138,8 @@ class Bookie:
                "season_type": game.season_type, "team": team, "team_name": side.name,
                "opp_name": game.other(team).name, "odds": side.moneyline, "stake": amount,
                "to_win": american_profit(amount, side.moneyline), "start": game.start.isoformat(),
-               "placed": self._clock(), "status": "open"}
+               "placed": self._clock(), "status": "open", "live": live,
+               "at": f"{game.detail}, {game.score_line()}" if live else ""}
         c["next_id"] += 1
         c["bets"].append(bet)
         p["bucks"] -= amount

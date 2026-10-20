@@ -255,6 +255,59 @@ class ESPN:
         return parse_scoring_plays(r.json())
 
 
+CORE = "https://sports.core.api.espn.com/v2/sports"
+LIVE_PROVIDER = "200"  # "DraftKings - Live Odds"
+FINAL_PERIOD = {"nfl": 4, "cfb": 4, "nba": 4, "wnba": 4, "cbb": 2, "nhl": 3, "mlb": 9}
+
+
+def prob_to_american(p: float, vig: float = 0.025) -> int:
+    """A win probability as American odds, shaded a little in the house's favor."""
+    p = min(0.99, max(0.01, p + vig))
+    return -round(100 * p / (1 - p)) if p >= 0.5 else round(100 * (1 - p) / p)
+
+
+def clock_seconds(clock: str) -> int | None:
+    m = re.fullmatch(r"\s*(\d+):(\d{2})(?:\.\d+)?\s*", clock or "")
+    return int(m.group(1)) * 60 + int(m.group(2)) if m else None
+
+
+def too_late_to_bet(g: Game) -> bool:
+    """Book closes on a live game in the last two minutes of regulation, and in overtime / extras."""
+    final = FINAL_PERIOD.get(g.league, 4)
+    if g.period > final:
+        return True
+    if g.league == "mlb":
+        return g.period >= final
+    secs = clock_seconds(g.clock)
+    return g.period == final and secs is not None and secs < 120
+
+
+async def live_odds(espn: "ESPN", g: Game) -> tuple[int, int] | None:
+    """(away, home) live moneylines: DraftKings' live line, else ESPN's live win probability."""
+    sport, league = LEAGUES[g.league][0].split("/")
+    try:
+        r = await espn._client.get(f"{CORE}/{sport}/leagues/{league}/events/{g.id}/competitions/{g.id}/odds")
+        r.raise_for_status()
+        for item in r.json().get("items") or []:
+            if str((item.get("provider") or {}).get("id")) == LIVE_PROVIDER:
+                away = _int((item.get("awayTeamOdds") or {}).get("moneyLine"))
+                home = _int((item.get("homeTeamOdds") or {}).get("moneyLine"))
+                if away and home:
+                    return away, home
+    except (httpx.HTTPError, ValueError):
+        pass
+    try:
+        r = await espn._client.get(f"{BASE}/{LEAGUES[g.league][0]}/summary", params={"event": g.id})
+        r.raise_for_status()
+        wp = r.json().get("winprobability") or []
+        if wp:
+            home_p = float(wp[-1]["homeWinPercentage"])
+            return prob_to_american(1 - home_p), prob_to_american(home_p)
+    except (httpx.HTTPError, ValueError, KeyError, TypeError):
+        pass
+    return None
+
+
 def et_date(dt: datetime) -> str:
     """The ESPN 'dates=' value for a game (US Eastern calendar day)."""
     return dt.astimezone(ET).strftime("%Y%m%d")

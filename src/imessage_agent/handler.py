@@ -59,7 +59,7 @@ from .logsafe import exc_name, log_event
 from .alerts import Alert
 from .bookie import Bookie, odds_line, parse_bet
 from .media import GifSearch, TweetFinder, clean_query, describe_tweet, gif_from_reaction
-from .sports import ESPN, LEAGUES, Game, TeamIndex, fmt_odds, league_hint
+from .sports import ESPN, LEAGUES, Game, TeamIndex, fmt_odds, league_hint, live_odds, too_late_to_bet
 from .memory import MemoryStore
 from .reminders import MAX_DAYS_AHEAD, Reminder, ReminderStore, describe, parse
 from .task import TaskRunner
@@ -1179,16 +1179,25 @@ class Agent:
             if isinstance(team, str):
                 await self._say(chat_guid, team, remember=False)
                 return
-            pre = sorted((g for g in games if g.state == "pre" and (team is None or (g.league == team[0] and g.team(team[1])))),
-                         key=lambda g: g.start)
+            mine = [g for g in games if team is None or (g.league == team[0] and g.team(team[1]))]
+            live = [g for g in mine if g.state == "in" and self.s.bookie_live and not too_late_to_bet(g)]
+            pre = sorted((g for g in mine if g.state == "pre"), key=lambda g: g.start)
             if team is not None:
-                pre = pre[:1]
-            if not pre:
+                live, pre = live[:1], ([] if live else pre[:1])
+            live = live[:8]
+            lines = []
+            for g, odds in zip(live, await asyncio.gather(*(live_odds(self.espn, g) for g in live))):
+                if odds:
+                    g.away.moneyline, g.home.moneyline = odds
+                    lines.append(f"🔴 LIVE {g.detail}: {g.away.name} {g.away.score} {fmt_odds(odds[0])} @ "
+                                 f"{g.home.name} {g.home.score} {fmt_odds(odds[1])}")
+            lines += [odds_line(g) for g in pre[:16 - len(lines)]]
+            if not lines:
                 await self._say(chat_guid, "nothing on the board for that right now", remember=False)
                 return
-            title = f"{LEAGUES[pre[0].league][1]} lines (moneyline)" if team is None else "next game"
+            title = f"{LEAGUES[mine[0].league][1]} lines (moneyline)" if team is None else "the line"
             more = "\n(/odds nba, nhl, mlb, cfb, cbb, wnba, or a team)" if not arg.strip() else ""
-            await self._say(chat_guid, f"{title}:\n" + "\n".join(odds_line(g) for g in pre[:16]) + more)
+            await self._say(chat_guid, f"{title}:\n" + "\n".join(lines) + more)
             return
         parsed = parse_bet(arg) or parse_bet(arg, loose=True)
         if parsed is None:
@@ -1200,11 +1209,23 @@ class Agent:
             await self._say(chat_guid, team, remember=False)
             return
         upcoming = sorted((g for g in games if team and g.league == team[0] and g.team(team[1])), key=lambda g: g.start)
-        game = next((g for g in upcoming if g.state == "pre"), upcoming[0] if upcoming else None)
+        # a game that's on right now is a live bet; otherwise their next game
+        game = next((g for g in upcoming if g.state == "in"), None) or next((g for g in upcoming if g.state == "pre"),
+                                                                             upcoming[0] if upcoming else None)
         if team is None or game is None:
             await self._say(chat_guid, "who? i don't have them on the board", remember=False)
             return
-        bet = book.place(chat_guid, who, name, game, team[1], stake)
+        live = game.state == "in"
+        if live:
+            if not self.s.bookie_live or too_late_to_bet(game):
+                await self._say(chat_guid, f"{game.matchup} is too far gone, book's closed on it", remember=False)
+                return
+            odds = await live_odds(self.espn, game)  # type: ignore[arg-type]
+            if odds is None:
+                await self._say(chat_guid, "no live line on that one right now", remember=False)
+                return
+            game.away.moneyline, game.home.moneyline = odds
+        bet = book.place(chat_guid, who, name, game, team[1], stake, live=live)
         if isinstance(bet, str):
             msg = {"started": f"{game.matchup} already started, book's closed on it",
                    "too_much": f"you've got {book.balance(chat_guid, who, name)} bucks, relax",
@@ -1216,7 +1237,7 @@ class Agent:
         fan = self._fan_of(name)
         if fan and game.league == "nfl" and fan == game.other(team[1]).abbr:
             quip = "betting against your own team. cold blooded"
-        when = game.start.astimezone().strftime("%a %-I:%M%p").lower()
+        when = f"LIVE ({game.detail}, {game.score_line()})" if live else game.start.astimezone().strftime("%a %-I:%M%p").lower()
         await self._say(chat_guid, f"locked: {name} {bet['stake']} on the {bet['team_name']} ({fmt_odds(bet['odds'])}) vs the "
                         f"{bet['opp_name']} {when}, pays {bet['to_win']}. {book.balance(chat_guid, who, name)} left. {quip}")
         log_event("bookie.bet", chat_guid=chat_guid, count=bet["stake"])
