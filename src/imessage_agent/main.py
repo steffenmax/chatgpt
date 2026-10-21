@@ -194,6 +194,9 @@ def create_app(settings: Settings | None = None, agent: Agent | None = None, env
                 except Exception:  # noqa: BLE001
                     pass
             asyncio.create_task(_warm(), name="kalshi-index")
+        watch_task = (
+            asyncio.create_task(ag.watcher.run(), name="resy-watches") if getattr(ag, "watcher", None) is not None else None
+        )
         reminder_task = (
             asyncio.create_task(ag.reminders.run(ag.fire_reminder), name="reminders")
             if ag.reminders is not None
@@ -214,6 +217,8 @@ def create_app(settings: Settings | None = None, agent: Agent | None = None, env
                 sports_task.cancel()
             if reminder_task is not None:
                 reminder_task.cancel()
+            if watch_task is not None:
+                watch_task.cancel()
             if brief_task is not None:
                 brief_task.cancel()
                 await ag.brief.aclose()
@@ -428,6 +433,11 @@ def _build_agent(settings: Settings) -> Agent:
         agent.resy = Resy(settings.resy_auth_token, settings.resy_api_key, settings.resy_lat, settings.resy_lon,
                           bookings_path=str(Path(settings.memory_dir or "~/Library/Application Support/imessage-agent/memory")
                                             .expanduser().parent / "resy-bookings.json"))
+        from .resy_watch import DropWatcher
+
+        agent.watcher = DropWatcher(agent.resy, str(Path(settings.memory_dir or "~/Library/Application Support/imessage-agent/memory")
+                                                     .expanduser().parent / "resy-watches.json"),
+                                    lambda chat, text: agent._say(chat, text))
     if settings.kalshi_enabled:
         from .kalshi import Kalshi
 

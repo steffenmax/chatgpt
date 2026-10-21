@@ -83,6 +83,7 @@ from .media import GifSearch, TweetFinder, clean_query, describe_tweet, gif_from
 from .kalshi import Kalshi, format_odds, wants_kalshi
 from .resy import (SPEC_SCHEMA, SPEC_SYSTEM, Booking, Parts, Resy, _fmt_time, find_options, is_yes, parse_parts,
                    spec_from_model, wants_cancel, wants_resy)
+from .resy_watch import DropWatcher, parse_watch, wants_watch, wants_watch_list, wants_watch_stop
 from .likeness import Likenesses, blocked
 from .voice import SOUND_TAGS, VoiceSynth, new_workdir, repeat_last, strip_tags, wants_voice
 from .recap import RECAP_SYSTEM, gather, wants_recap, window_from
@@ -250,6 +251,7 @@ class Agent:
         self.kalshi = kalshi
         # Optional Resy bookings, and the per-chat vote waiting on yes's.
         self.resy = resy
+        self.watcher: DropWatcher | None = None  # Resy drop watches (resy_watch.py)
         self._resy_pending: dict[str, dict[str, Any]] = {}
         self._resy_drafts: dict[str, dict[str, Any]] = {}  # a request still missing details
         self._resy_choices: dict[str, dict[str, Any]] = {}  # "pick 1, 2 or 3" after an area search
@@ -381,7 +383,7 @@ class Agent:
                 has_link = True
                 self._read_links(chat_guid, stored, urls)
         # a reservation still being worked out: the asker's next messages fill it in / pick an option
-        if trigger.kind in ("none", "mention") and self.resy is not None and not wants_resy(text):
+        if trigger.kind in ("none", "mention") and self.resy is not None and not wants_resy(text) and not wants_watch(text):
             handled = await self._resy_followup(chat_guid, sender, address, strip_cards(text))
             if handled:
                 return handled
@@ -416,7 +418,11 @@ class Agent:
             return "stored"
 
         # "ricky 50 on the jets" is a bet, "ricky catch me up" a recap, not chat
-        if trigger.kind == "mention" and self.resy is not None and wants_cancel(text) and self.resy.bookings():
+        if trigger.kind == "mention" and self.watcher is not None and (
+                wants_watch(text) or wants_watch_list(text, self.s.bot_name)
+                or (wants_watch_stop(text) and any(w.chat == chat_guid for w in self.watcher.watches()))):
+            trigger = Trigger("resy_watch", text)
+        elif trigger.kind == "mention" and self.resy is not None and wants_cancel(text) and self.resy.bookings():
             trigger = Trigger("resy_cancel", text)
         elif trigger.kind == "mention" and self.resy is not None and wants_resy(text):
             trigger = Trigger("resy", text)
@@ -467,6 +473,8 @@ class Agent:
                 await self._handle_opt(chat_guid, address, trigger.kind == "optin")
             elif trigger.kind == "resy":
                 await self._handle_resy(chat_guid, sender, address, trigger.arg)
+            elif trigger.kind == "resy_watch":
+                await self._handle_watch(chat_guid, sender, trigger.arg)
             elif trigger.kind == "resy_cancel":
                 await self._handle_resy_cancel(chat_guid, sender, address, trigger.arg)
             elif trigger.kind == "enhance":
@@ -1742,6 +1750,44 @@ class Agent:
         await self._say(chat_guid, f"{need}/{need}, locked in 🔒 {venue.name} {pending['when']} for {pending['party']}, under "
                                    f"{self.s.resy_owner_name}'s name. ('{self.s.bot_name.lower()} cancel the {venue.name.lower()} "
                                    f"res' if plans change)")
+
+    async def _handle_watch(self, chat_guid: str, who: str, text: str) -> None:
+        """'ricky watch 4 charles drop at 9am' / 'what are you watching' / 'stop watching 4 charles'."""
+        w8 = self.watcher
+        assert w8 is not None and self.resy is not None
+        mine = [w for w in w8.watches() if w.chat == chat_guid]
+        if wants_watch_stop(text) and mine:
+            name = re.sub(r"\b(stop|quit|cancel|kill|remove|delete|unwatch|watch(ing|es)?|the|all|off|for|on|"
+                          rf"{re.escape(self.s.bot_name)})\b", " ", text, flags=re.IGNORECASE)
+            gone = w8.remove(chat_guid, name)
+            await self._say(chat_guid, f"ok, stopped watching {', '.join(w.venue_name for w in gone)}" if gone
+                            else "not watching anything like that in here", remember=False)
+            return
+        if not wants_watch(text):
+            await self._say(chat_guid, ("watching:\n" + "\n".join(f"- {w.describe()}" for w in mine)) if mine
+                            else "not watching any drops in here", remember=False)
+            return
+        spec = parse_watch(text, datetime.now().date(), self.s.bot_name)
+        if not spec.venue:
+            await self._say(chat_guid, "watch which place?", remember=False)
+            return
+        if spec.drop is None:
+            await self._say(chat_guid, f"what time does {spec.venue} drop? say it like 'watch {spec.venue} drop at 9am'",
+                            remember=False)
+            return
+        try:
+            venue = await self.resy.find_venue(spec.venue)
+        except Exception as exc:  # noqa: BLE001
+            log_event("resy.watch_lookup_failed", chat_guid=chat_guid, error=exc_name(exc))
+            venue = None
+        if venue is None:
+            await self._say(chat_guid, f"can't find {spec.venue} on resy", remember=False)
+            return
+        w = w8.add(chat_guid, venue, spec.drop, spec.on, spec.parties, who)
+        when = "that morning" if spec.on else "every day"
+        await self._say(chat_guid, f"bet, watching the {w.describe()} drop. i start checking a minute before, {when}, "
+                                   "and blast the chat the second anything opens, any date, any time"
+                                   + ("" if spec.on else ". i stay quiet on days nothing opens"), remember=False)
 
     async def _handle_resy_cancel(self, chat_guid: str, who: str, address: str | None, text: str) -> None:
         items = self.resy.bookings() if self.resy is not None else []  # type: ignore[union-attr]
