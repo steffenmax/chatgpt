@@ -121,6 +121,8 @@ class Settings(BaseSettings):
     # search. Everything else stays local. Off by default.
     cloud_facts_enabled: bool = False
     cloud_facts_max_searches: int = Field(default=3, ge=0, le=10)
+    # The model that looks facts up (fast is better here; the bot writes the reply itself).
+    lookup_model: str = "claude-sonnet-5-5"
     # /task: multi-step research jobs run by Claude (Agent SDK) with web search, web fetch
     # and a sandbox folder. Only from the chats listed in TASK_CHAT_GUIDS. Off by default.
     task_enabled: bool = False

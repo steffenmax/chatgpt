@@ -40,9 +40,11 @@ FACT_FINDER_SYSTEM = (
     "in one plain line. Under 600 characters."
 )
 LOOKED_UP = (
-    "\n\nYou just looked this up, and it's accurate:\n{facts}\nAnswer with it in your own voice and style, "
-    "jokes and all, but keep every name, number, score, date and time exactly as above and don't add any "
-    "facts or numbers of your own."
+    "\n\nYou just looked this up, and it's accurate (your own knowledge is old, so trust this over it):\n{facts}\n"
+    "Now answer in your own voice and style, jokes and all. If they asked for an opinion or a call (start or sit, "
+    "who wins, is it worth it), make the call yourself from these facts, commit to it and give the reason in a few "
+    "words. Keep every name, number, score, date and time exactly as above and don't add any facts or numbers "
+    "of your own."
 )
 FACTS_STRICT = "\n\nYour last try changed or invented a number. Use ONLY the numbers in what you looked up."
 
@@ -120,6 +122,42 @@ def mentions_bots(text: str, bot_name: str) -> bool:
                           r"artificial intelligence)\b", text or "", re.IGNORECASE))
 
 
+# Backup for the router: questions that need this season's facts go to a lookup even if it says "chat".
+_NEEDS_LOOKUP = re.compile(
+    r"\b(start|sit|bench|fantasy|waivers?|waiver wire|flex|ppr|injur(?:y|ed|ies)|questionable|doubtful|out for|"
+    r"trade(?:d)?|rookie|this (?:week|season|year)|tonight'?s|last night|who won|score|standings|playoffs?|odds|"
+    r"stats?|depth chart|cut|signed|released)\b",
+    re.IGNORECASE,
+)
+
+
+def needs_lookup(text: str) -> bool:
+    """A question about this season's players, games or fantasy: the 2023-era model can't answer it."""
+    return bool(_NEEDS_LOOKUP.search(text or "")) and asks_something(text)
+
+
+def asks_something(text: str) -> bool:
+    """A direct question (the kind of answer that can contradict itself)."""
+    t = (text or "").strip()
+    return "?" in t or bool(re.match(r"(?i)^\W*(?:\w+[,:]?\s+)?(should|who|what|which|when|where|why|how|is|are|do|does|did|"
+                                      r"will|would|can|could)\b", t))
+
+
+CONTRADICTION_SYSTEM = (
+    "Check one reply from a group-chat bot. Does it contradict itself: says both yes and no to the same thing, "
+    "or recommends doing something and also not doing it, or calls something good and bad in the same breath? "
+    "Jokes, sarcasm and roasting are fine; only an answer that cancels itself out counts. Answer ONLY with JSON "
+    "matching the schema."
+)
+CONTRADICTION_SCHEMA = {"type": "object", "properties": {"contradicts": {"type": "boolean"}}, "required": ["contradicts"]}
+NO_CONTRADICTION = ("\n\nYour last answer contradicted itself. Give ONE clear answer, commit to it, and keep it "
+                    "consistent from start to finish.")
+
+
+def parse_contradiction(raw: str) -> bool:
+    return bool(re.search(r'"contradicts"\s*:\s*true', raw or ""))
+
+
 def looks_like_gif_request(text: str) -> bool:
     return bool(re.search(r"\bgifs?\b", text or "", re.IGNORECASE))
 
@@ -181,8 +219,11 @@ INTENT_SYSTEM = (
     "inventing extra scenes, styles or characters they did not mention.\n"
     "- \"remind\": they want to be reminded of something later. Put the time phrase exactly as said "
     "in \"when\" (e.g. \"in 20m\", \"at 7pm\", \"tomorrow 9am\", \"sat 3pm\") and the thing in \"what\".\n"
-    "- \"lookup\": answering needs current or outside information (scores, schedules, news, prices, "
-    "weather, hours, who won, precise stats/dates).\n"
+    "- \"lookup\": answering needs current or outside information. {bot_name}'s own knowledge stops in 2023, so "
+    "this includes: scores, schedules, news, prices, weather, hours, who won, precise stats/dates; anything about "
+    "current players, rosters, injuries, trades, rookies or this season; fantasy sports (start/sit, waivers, "
+    "trades, rankings); and any person, team, product or event that may be from after 2023. If {bot_name} might "
+    "not know who or what they mean, choose lookup.\n"
     "- \"forget\": they explicitly ask {bot_name} to forget/wipe what it remembers.\n"
     "- \"gif\": they ask {bot_name} for a GIF. Put what the GIF should show in \"prompt\" (2-5 words).\n"
     "- \"tweet\": they ask {bot_name} to find or send a tweet/post from Twitter/X. Put the topic in "

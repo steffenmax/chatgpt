@@ -62,7 +62,7 @@ def build_cloud(settings: Settings) -> TextBackend | None:
         return None
     return AnthropicBackend(
         api_key=settings.anthropic_api_key,
-        model=settings.anthropic_model,
+        model=settings.lookup_model or settings.anthropic_model,
         max_tokens=settings.anthropic_max_tokens,
         timeout=settings.anthropic_timeout_seconds,
         web_search=True,

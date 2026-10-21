@@ -27,6 +27,9 @@ from .llm import (
     LOOKUP_NOTICES,
     ADDRESSEE_SCHEMA,
     BUDDY_MOOD_SCHEMA,
+    CONTRADICTION_SCHEMA,
+    CONTRADICTION_SYSTEM,
+    NO_CONTRADICTION,
     BUDDY_MOOD_SYSTEM,
     ADDRESSEE_SYSTEM,
     AFTERWORD_SUFFIX,
@@ -49,7 +52,10 @@ from .llm import (
     looks_like_gif_request,
     looks_like_image_request,
     looks_like_tweet_request,
+    asks_something,
     mentions_bots,
+    needs_lookup,
+    parse_contradiction,
     parse_mood,
     parse_intent,
     parse_reaction,
@@ -674,6 +680,11 @@ class Agent:
                 break
         who = upto[-1].sender if upto else "someone"
         intent = Intent("lookup") if force_cloud else await self._intent(upto)
+        ping = strip_cards(upto[-1].text) if upto else ""
+        if intent.action == "chat" and self.cloud is not None and needs_lookup(ping):
+            # the router thought the old model could handle it; this season's facts say otherwise
+            log_event("intent", chat_guid=chat_guid, kind="lookup", reason="current_events")
+            intent = Intent("lookup")
         if intent.action == "image" and self.images is not None:
             log_event("intent", chat_guid=chat_guid, kind="image")
             await self._handle_image(chat_guid, intent.prompt)
@@ -697,10 +708,10 @@ class Agent:
             return
         nudge = target_nudge(pings or ([marker] if marker is not None else []))
         await self._reply(chat_guid, history, use_cloud=(intent.action == "lookup"),
-                          reason="command" if force_cloud else "intent", nudge=nudge)
+                          reason="command" if force_cloud else "intent", nudge=nudge, question=ping)
 
     async def _reply(self, chat_guid: str, history, use_cloud: bool, reason: str, nudge: str = "",
-                     as_voice: bool = False) -> None:
+                     as_voice: bool = False, question: str = "") -> None:
         messages = build_messages(self.s.persona, self.s.bot_name, history)
         backend = self.llm
         system = self._system_for(chat_guid) + nudge
@@ -731,6 +742,13 @@ class Agent:
                     if not facts_kept(clean_reply(raw, self.s.bot_name), facts, chat_text):
                         log_event("lookup.numbers_changed", chat_guid=chat_guid, attempt=2)
                         raw = facts  # the plain facts beat a garbled score
+            draft = clean_reply(raw, self.s.bot_name)
+            if (question and asks_something(question) and raw != facts and len(draft.split()) >= 6
+                    and await self._contradicts(draft)):
+                log_event("reply.contradiction", chat_guid=chat_guid)
+                retry = await ask(backend, system + NO_CONTRADICTION)
+                if not facts or facts_kept(clean_reply(retry, self.s.bot_name), facts, "\n".join(m.text for m in history[-20:])):
+                    raw = retry
             reply, impersonated = fix_speaker(clean_reply(raw, self.s.bot_name), names, self.s.bot_name)
             if impersonated:
                 # It wrote a line as one of the members: ask once more, then strip the label.
@@ -770,6 +788,18 @@ class Agent:
             await self._say_voice(chat_guid, reply)
         else:
             await self._say(chat_guid, reply)
+
+    async def _contradicts(self, reply: str) -> bool:
+        """Quick local check: does this answer cancel itself out? (Called with the LLM gate held.)"""
+        try:
+            structured = getattr(self.llm, "structured", None)
+            msgs = [{"role": "user", "content": f"Reply: {reply}\n\nJSON only."}]
+            raw = await structured(CONTRADICTION_SYSTEM, msgs, CONTRADICTION_SCHEMA) if structured else \
+                await self.llm.reply(CONTRADICTION_SYSTEM, msgs)
+        except Exception as exc:  # noqa: BLE001
+            log_event("reply.check_failed", error=exc_name(exc))
+            return False
+        return parse_contradiction(raw)
 
     async def _look_up(self, chat_guid: str, history, nudge: str) -> str:
         """Plain facts from the cloud model (web search), or '' if it's unavailable."""

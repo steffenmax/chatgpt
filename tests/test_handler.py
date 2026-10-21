@@ -189,10 +189,11 @@ async def test_mention_routed_to_cloud_when_router_says_yes(clock):
     local.reply_text = "giants won 24-10, texans fans in shambles"
     assert await agent.process(message("coco who won last night?", guid="c1")) == "handled:mention"
     assert len(cloud.calls) == 1, "the cloud model only looks the facts up"
-    assert len(local.calls) == 2, "dispatcher, then the local model writes the answer"
+    assert len(local.calls) == 3, "dispatcher, the local model writes the answer, then checks it doesn't contradict itself"
     assert "research tool" in cloud.system and "Answer with it in your own voice" not in cloud.system
     assert agent.s.persona.split(".")[0] not in cloud.system  # no persona for the cloud model
-    assert "You just looked this up, and it's accurate:\nGiants 24, Texans 10 (Sunday)." in local.systems[-1]
+    reply_system = next(x for x in reversed(local.systems) if "You just looked this up" in x)
+    assert "trust this over it):\nGiants 24, Texans 10 (Sunday)." in reply_system
     assert len(bb.texts) == 2, "a 'looking it up' notice, then the answer"
     assert "look" in bb.texts[0][1] or "check" in bb.texts[0][1] or "find out" in bb.texts[0][1]
     assert bb.texts[1] == (ALLOWED, "giants won 24-10, texans fans in shambles")
@@ -347,7 +348,8 @@ async def test_memory_notes_written_and_injected(clock, tmp_path):
     assert "Alex: lowercase" in path.read_text()
     # the notes are part of the system prompt for the next mention, but not of the log
     await agent.process(message("coco what's up", guid="m3"))
-    assert "Alex: lowercase" in llm.systems[-1] and "never read them out" in llm.systems[-1]
+    reply_system = next(x for x in reversed(llm.systems) if "never read them out" in x)  # last one may be the self-check
+    assert "Alex: lowercase" in reply_system
 
 
 
@@ -844,3 +846,43 @@ async def test_image_acks_vary_and_mention_the_queue(clock):
     agent.images = Q(2)
     await agent._handle_image(ALLOWED, "a corgi surfing")
     assert agent.bb.texts[-1][1] in [q.replace("{n}", "2") for q in IMAGE_QUEUE_ACKS]
+
+
+async def test_fantasy_question_goes_to_lookup_even_if_router_says_chat(clock):
+    agent, bb, local, cloud = _cloud_agent("no", clock)  # router answers "chat"
+    cloud.reply_text = "Jeremiyah Love (Bears RB): questionable, limited practice Wednesday."
+    local.reply_text = "start him, questionable but he practiced, joe don't be scared"
+    await agent.process(message("coco should I start Jeremiyah Love in fantasy this week", guid="fl1"))
+    assert len(cloud.calls) == 1 and "make the call yourself" in local.systems[-2]
+    assert bb.texts[-1][1] == "start him, questionable but he practiced, joe don't be scared"
+
+
+async def test_self_contradicting_answer_is_rewritten_once(clock):
+    from tests.conftest import FakeBB, make_settings
+    from imessage_agent.context import ContextStore
+
+    class LLM:
+        name = "fake"
+
+        def __init__(self):
+            self.n = 0
+
+        async def reply(self, system, messages, stop=None):
+            if "dispatcher" in system:
+                return '{"action": "chat"}'
+            if "Check one reply" in system:
+                return '{"contradicts": true}' if "bust" in messages[0]["content"] else '{"contradicts": false}'
+            self.n += 1
+            return "nah he's a bust, keep playing him though" if self.n == 1 else "bench him, he's a bust this week"
+
+        async def healthy(self):
+            return True
+
+        async def aclose(self):
+            pass
+
+    bb = FakeBB()
+    agent = Agent(make_settings(), bb, LLM(), ContextStore(10, 3600, clock=clock), images=None,  # type: ignore[arg-type]
+                  resolver=SenderResolver(None, {}, use_contacts=False))
+    await agent.process(message("coco should I play my backup tight end or not?", guid="sc1"))
+    assert bb.texts[-1][1] == "bench him, he's a bust this week"
