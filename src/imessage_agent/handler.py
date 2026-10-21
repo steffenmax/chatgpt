@@ -18,7 +18,9 @@ from .config import Settings
 from .context import ContextStore
 from .imagegen import ImageJob, ImageQueue
 from .llm import (
-    CLOUD_FACTS_ADDENDUM,
+    FACT_FINDER_SYSTEM,
+    FACTS_STRICT,
+    LOOKED_UP,
     INTENT_SCHEMA,
     INTENT_SYSTEM,
     LOOKUP_NOTICES,
@@ -37,6 +39,7 @@ from .llm import (
     TextBackend,
     build_messages,
     clean_reply,
+    facts_kept,
     fix_speaker,
     intent_messages,
     is_refusal,
@@ -663,12 +666,14 @@ class Agent:
         messages = build_messages(self.s.persona, self.s.bot_name, history)
         backend = self.llm
         system = self._system_for(chat_guid) + nudge
+        facts = ""
         if use_cloud and self.cloud is not None:
-            backend = self.cloud
-            system = system + CLOUD_FACTS_ADDENDUM
-            log_event("llm.escalate", chat_guid=chat_guid, reason=reason, backend=backend.name)
+            log_event("llm.escalate", chat_guid=chat_guid, reason=reason, backend=self.cloud.name)
             # Say so first: the lookup takes 10-20 s and silence reads as ignoring them.
             await self._say(chat_guid, random.choice(LOOKUP_NOTICES), remember=False)
+            facts = await self._look_up(chat_guid, history, nudge)
+            if facts:
+                system += LOOKED_UP.replace("{facts}", facts)
         names = speaker_names(history, self.s.bot_name)
         stops = stop_sequences(names)
 
@@ -679,15 +684,15 @@ class Agent:
 
         started = time.monotonic()
         async with self._llm_gate:
-            try:
-                raw = await ask(backend, system)
-            except Exception as exc:  # noqa: BLE001
-                if backend is self.llm:
-                    raise
-                # Cloud unavailable (no credits, network, rate limit): answer locally instead.
-                log_event("llm.cloud_failed", chat_guid=chat_guid, backend=backend.name, error=exc_name(exc))
-                backend, system = self.llm, self._system_for(chat_guid)
-                raw = await ask(backend, system)
+            raw = await ask(backend, system)
+            if facts:
+                chat_text = "\n".join(m.text for m in history[-20:])
+                if not facts_kept(clean_reply(raw, self.s.bot_name), facts, chat_text):
+                    log_event("lookup.numbers_changed", chat_guid=chat_guid, attempt=1)
+                    raw = await ask(backend, system + FACTS_STRICT)
+                    if not facts_kept(clean_reply(raw, self.s.bot_name), facts, chat_text):
+                        log_event("lookup.numbers_changed", chat_guid=chat_guid, attempt=2)
+                        raw = facts  # the plain facts beat a garbled score
             reply, impersonated = fix_speaker(clean_reply(raw, self.s.bot_name), names, self.s.bot_name)
             if impersonated:
                 # It wrote a line as one of the members: ask once more, then strip the label.
@@ -724,6 +729,23 @@ class Agent:
         if not reply:
             reply = "hm, blanked. say that again?"
         await self._say(chat_guid, reply)
+
+    async def _look_up(self, chat_guid: str, history, nudge: str) -> str:
+        """Plain facts from the cloud model (web search), or '' if it's unavailable."""
+        recent = [m for m in history[-12:]]
+        lines = "\n".join(f"{self.s.bot_name}: {strip_cards(m.text)}" if m.from_bot else f"{m.sender}: {strip_cards(m.text)}"
+                          for m in recent)
+        target = re.sub(r"\s+", " ", nudge).strip()
+        system = FACT_FINDER_SYSTEM.replace("{bot_name}", self.s.bot_name).replace(
+            "{target}", f" ({target.split('. Answer that')[0]}.)" if target else "")
+        try:
+            facts = await self.cloud.reply(system, [{"role": "user", "content": lines or "(no messages)"}])  # type: ignore[union-attr]
+        except Exception as exc:  # noqa: BLE001
+            log_event("llm.cloud_failed", chat_guid=chat_guid, backend=self.cloud.name, error=exc_name(exc))  # type: ignore[union-attr]
+            return ""
+        facts = strip_fake_notes(re.sub(r"https?://\S+", "", facts or "")).strip()[:900]
+        log_event("lookup.facts", chat_guid=chat_guid, chars=len(facts))
+        return facts
 
     async def _intent(self, history) -> Intent:
         """Ask the local model which tool (if any) the last message calls for."""

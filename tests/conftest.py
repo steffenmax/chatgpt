@@ -62,6 +62,7 @@ class FakeLLM:
 
     async def reply(self, system, messages):
         self.calls.append(messages)
+        self.system = system
         return self.reply_text
 
     async def healthy(self):

@@ -28,14 +28,30 @@ NEEDS_FACTS_SYSTEM = (
     "Answer with exactly one word: yes or no."
 )
 
-CLOUD_FACTS_ADDENDUM = (
-    "\n\nFor this reply you have a web search tool. Use it when the question needs current or "
-    "precise facts (scores, schedules, news, prices, weather, stats); one or two quick searches "
-    "are enough. You already told the chat you were going to look it up, so come straight back "
-    "with what you found, in the same short texting style described above and fully in character: "
-    "facts first, then the bit, no markdown, no links unless someone asks for one, and name the "
-    "source in a few words only if it matters."
+
+# The cloud model only fetches facts (no persona, so no "in character" second-guessing); the local
+# model then answers in the bot's own voice from them.
+FACT_FINDER_SYSTEM = (
+    "You are the research tool behind a group-chat bot called {bot_name}. Below are the latest messages from "
+    "the chat; someone asked {bot_name} something that needs current or precise information.{target} Use web "
+    "search (one or two searches are enough) and reply with ONLY the facts that answer it: short plain lines "
+    "with the specific names, numbers, scores, dates, times and prices. No opinions, no jokes, no greeting, "
+    "nothing about the people in the chat, no links, no markdown. If something can't be confirmed, say that "
+    "in one plain line. Under 600 characters."
 )
+LOOKED_UP = (
+    "\n\nYou just looked this up, and it's accurate:\n{facts}\nAnswer with it in your own voice and style, "
+    "jokes and all, but keep every name, number, score, date and time exactly as above and don't add any "
+    "facts or numbers of your own."
+)
+FACTS_STRICT = "\n\nYour last try changed or invented a number. Use ONLY the numbers in what you looked up."
+
+
+def facts_kept(reply: str, facts: str, chat_text: str = "") -> bool:
+    """Every number in the reply comes from the looked-up facts (or was already in the chat)."""
+    have = set(_NUM.findall(facts or "")) | set(_NUM.findall(chat_text or ""))
+    return all(n in have for n in _NUM.findall(reply or ""))
+
 
 # Sent before a cloud lookup so the chat knows the pause is on purpose.
 LOOKUP_NOTICES = [

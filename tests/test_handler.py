@@ -156,6 +156,7 @@ class RoutingLLM:
 
     async def reply(self, system, messages):
         self.calls.append(messages)
+        self.systems = getattr(self, "systems", []) + [system]
         return self.intent_json if "dispatcher" in system else self.reply_text
 
     async def healthy(self):
@@ -184,13 +185,25 @@ def _cloud_agent(local_reply, clock):
 
 async def test_mention_routed_to_cloud_when_router_says_yes(clock):
     agent, bb, local, cloud = _cloud_agent("yes", clock)
+    cloud.reply_text = "Giants 24, Texans 10 (Sunday)."
+    local.reply_text = "giants won 24-10, texans fans in shambles"
     assert await agent.process(message("coco who won last night?", guid="c1")) == "handled:mention"
-    assert len(local.calls) == 1, "local model is asked only which tool to use"
-    assert local.calls[0][0]["content"].endswith("JSON only.")
-    assert len(cloud.calls) == 1
+    assert len(cloud.calls) == 1, "the cloud model only looks the facts up"
+    assert len(local.calls) == 2, "dispatcher, then the local model writes the answer"
+    assert "research tool" in cloud.system and "Answer with it in your own voice" not in cloud.system
+    assert agent.s.persona.split(".")[0] not in cloud.system  # no persona for the cloud model
+    assert "You just looked this up, and it's accurate:\nGiants 24, Texans 10 (Sunday)." in local.systems[-1]
     assert len(bb.texts) == 2, "a 'looking it up' notice, then the answer"
     assert "look" in bb.texts[0][1] or "check" in bb.texts[0][1] or "find out" in bb.texts[0][1]
-    assert bb.texts[1] == (ALLOWED, "from the cloud")
+    assert bb.texts[1] == (ALLOWED, "giants won 24-10, texans fans in shambles")
+
+
+async def test_lookup_falls_back_to_plain_facts_when_numbers_change(clock):
+    agent, bb, local, cloud = _cloud_agent("yes", clock)
+    cloud.reply_text = "Giants 24, Texans 10."
+    local.reply_text = "giants won 31-3 easy"  # garbled score, both tries
+    await agent.process(message("coco who won last night?", guid="c9"))
+    assert bb.texts[-1][1] == "Giants 24, Texans 10."
 
 
 async def test_mention_stays_local_when_router_says_no(clock):
@@ -204,11 +217,11 @@ async def test_mention_stays_local_when_router_says_no(clock):
 async def test_ask_command_always_goes_to_cloud(clock):
     agent, bb, local, cloud = _cloud_agent("no", clock)
     assert await agent.process(message("/ask what time is kickoff", guid="c3")) == "handled:ask"
-    assert local.calls == []
+    assert len(local.calls) == 1  # no dispatcher for /ask, just the answer
     assert len(cloud.calls) == 1
     # the question itself (without the slash command) is what the cloud model sees
     assert cloud.calls[0][-1]["content"].endswith("what time is kickoff")
-    assert len(bb.texts) == 2 and bb.texts[1] == (ALLOWED, "from the cloud")
+    assert len(bb.texts) == 2 and bb.texts[1] == (ALLOWED, "no")
 
 
 async def test_ask_without_cloud_falls_back_to_local(agent_parts):
