@@ -24,7 +24,10 @@ def test_speakable_and_triggers():
     assert p == {"dziuba": "ʤˈubə", "coco": "kˈOkO"}
     assert speakable("Dziuba 💀 lost https://x.com/a [sent a gif: x] again", p) == "[Dziuba](/ʤˈubə/) lost again"
     assert wants_voice("coco send a voice note") and wants_voice("coco say that out loud") and not wants_voice("coco who won")
-    assert repeat_last("coco say that out loud") and not repeat_last("coco send a voice note roasting mike")
+    assert repeat_last("coco say that out loud", "coco") and not repeat_last("coco send a voice note roasting mike", "coco")
+    # something to actually say is a new reply, not a re-read of the last one
+    assert not repeat_last("coco say happy birthday to tom, say it out loud", "coco")
+    assert repeat_last("coco say it again pls", "coco")
 
 
 def _agent(clock, voice):
@@ -79,3 +82,13 @@ async def test_expressive_voice_gets_tags_and_memory_stays_clean(clock):
     assert "<laugh>" in llm_systems[-1] and "sound tags" in llm_systems[-1]
     assert v.said[-1] == "<laugh> mike you absolute clown"
     assert agent.context.get(ALLOWED)[-1].text == "mike you absolute clown"
+
+
+
+async def test_say_something_out_loud_is_a_new_reply_not_a_repeat(clock):
+    v = FakeVoice()
+    agent, bb, llm = _agent(clock, v)
+    agent.context.add(ALLOWED, "Coco", "yesterday's take", from_bot=True)
+    await agent.process(message("coco say happy birthday to tom, say it out loud", guid="hb"))
+    assert v.said[-1] == "mike you absolute clown"  # the fake model's new reply, spoken
+    assert "yesterday's take" not in v.said

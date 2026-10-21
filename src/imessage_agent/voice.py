@@ -47,9 +47,22 @@ def wants_voice(text: str) -> bool:
     return bool(VOICE_ASK.search(text or ""))
 
 
-def repeat_last(text: str) -> bool:
-    """'say that out loud' / 'read it' means speak the bot's last message, not write a new one."""
-    return bool(SAY_LAST.search(text or ""))
+_VOICE_WORDS = re.compile(
+    r"\b(send|sends|me|us|a|an|the|in|voice ?notes?|voice ?memos?|voice|audio|messages?|msg|out ?loud|aloud|say|said|read|"
+    r"it|that|this|again|pls|plz|please|yo|now|bro|dude|just|can|you|could|will|ya|let|hear|talk|to|with|your|mouth|chest|"
+    r"and|then|one|more|time|for|real)\b",
+    re.IGNORECASE,
+)
+
+
+def repeat_last(text: str, bot_name: str = "") -> bool:
+    """'say that out loud' / 'read it again' means speak the bot's last message. Anything with something to
+    say in it ('say happy birthday to tom out loud') is a new reply, spoken."""
+    if not SAY_LAST.search(text or ""):
+        return False
+    rest = re.sub(rf"\b{re.escape(bot_name)}\b", " ", text or "", flags=re.IGNORECASE) if bot_name else text or ""
+    rest = _VOICE_WORDS.sub(" ", re.sub(r"[^\w' ]", " ", rest))
+    return not re.search(r"[a-z0-9]", rest, re.IGNORECASE)
 
 
 def parse_pronunciations(raw: str) -> dict[str, str]:

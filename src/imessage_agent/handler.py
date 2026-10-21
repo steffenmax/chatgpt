@@ -1656,7 +1656,7 @@ class Agent:
             return
         async with self._chat_lock(chat_guid):
             history = self.context.get(chat_guid)
-            if repeat_last(text):
+            if repeat_last(text, self.s.bot_name):
                 last = next((m.text for m in reversed(history) if m.from_bot and not m.text.startswith("[")), None)
                 if last:
                     await self._say_voice(chat_guid, last, remember=False)
