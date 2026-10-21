@@ -884,3 +884,10 @@ async def test_self_contradicting_answer_is_rewritten_once(clock):
                   resolver=SenderResolver(None, {}, use_contacts=False))
     await agent.process(message("coco should I play my backup tight end or not?", guid="sc1"))
     assert bb.texts[-1][1] == "bench him, he's a bust this week"
+
+
+def test_canned_chime_ins_are_blocked_but_short_ones_pass():
+    from imessage_agent.handler import _canned
+
+    assert _canned("fraud alert") and _canned("Insane behavior!") and _canned("absolute cinema.")
+    assert not _canned("💀") and not _canned("W") and not _canned("lmaooo") and not _canned("fraud alert on dziuba's photo take")

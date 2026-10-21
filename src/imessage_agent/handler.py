@@ -1214,6 +1214,9 @@ class Agent:
             reaction = parse_reaction(raw)
             if reaction and last and reaction.lower().rstrip("o!. ") == last.lower().rstrip("o!. "):
                 reaction = None  # same as last time
+            if reaction and _canned(reaction):
+                log_event("reaction.canned", chat_guid=chat_guid)
+                reaction = None  # copied an example word for word instead of reacting to the message
             if not reaction:
                 log_event("reaction.considered", chat_guid=chat_guid, status="none")
                 return
@@ -1818,6 +1821,15 @@ class Agent:
         self._unanswered.clear()
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
+
+
+def _canned(reaction: str) -> bool:
+    """A word-for-word copy of one of the longer example chime-ins ('fraud alert'); short universal ones are fine."""
+    from .llm import REACTION_EXAMPLES
+
+    norm = lambda t: re.sub(r"[^a-z0-9 ]", "", t.lower()).strip()
+    r = norm(reaction)
+    return any(r == norm(e) for e in REACTION_EXAMPLES if len(norm(e)) > 5 and " " in norm(e))
 
 
 def _from_their_side(text: str, setter: str) -> str:
