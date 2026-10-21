@@ -46,6 +46,7 @@ class Reminder:
     text: str
     due: float  # unix epoch seconds
     created: float
+    for_whom: str = ""  # who gets reminded: "" = whoever set it, a name, or "everyone"
 
 
 def _clock(now: datetime, day_word: str | None, hh: str, mm: str | None, ampm: str | None) -> datetime | None:
@@ -142,7 +143,7 @@ class ReminderStore:
         except (OSError, ValueError) as exc:
             log_event("reminders.load_failed", error=exc_name(exc))
             return
-        self._items = [Reminder(**r) for r in raw.get("items", [])]
+        self._items = [Reminder(**{k: v for k, v in r.items() if k in Reminder.__dataclass_fields__}) for r in raw.get("items", [])]
         self._next_id = int(raw.get("next_id", 1))
 
     def _save(self) -> None:
@@ -162,10 +163,10 @@ class ReminderStore:
             raise
 
     # -- API --
-    def add(self, chat_guid: str, who: str, text: str, due: float) -> Reminder | None:
+    def add(self, chat_guid: str, who: str, text: str, due: float, for_whom: str = "") -> Reminder | None:
         if len(self.pending(chat_guid)) >= MAX_PER_CHAT:
             return None
-        r = Reminder(self._next_id, chat_guid, who, text[:300], due, self._clock())
+        r = Reminder(self._next_id, chat_guid, who, text[:300], due, self._clock(), for_whom)
         self._next_id += 1
         self._items.append(r)
         self._save()

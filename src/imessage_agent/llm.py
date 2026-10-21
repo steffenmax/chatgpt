@@ -158,6 +158,15 @@ def parse_contradiction(raw: str) -> bool:
     return bool(re.search(r'"contradicts"\s*:\s*true', raw or ""))
 
 
+REMINDER_SYSTEM = (
+    "{persona}\n\nIt's time to give a reminder you were asked to give in this group chat. {setup} The thing to "
+    "remind them about: \"{what}\". Write the text you send now: address {target} at the start, say what "
+    "they need to do in your own words and style (one or two short lines), and keep every name, number, amount, "
+    "time and place from the reminder exactly. Words like 'me' and 'my' in it mean {setter}. Don't add anything "
+    "that isn't in the reminder, no links, no emoji spam."
+)
+
+
 def looks_like_gif_request(text: str) -> bool:
     return bool(re.search(r"\bgifs?\b", text or "", re.IGNORECASE))
 
@@ -219,6 +228,9 @@ INTENT_SYSTEM = (
     "inventing extra scenes, styles or characters they did not mention.\n"
     "- \"remind\": they want to be reminded of something later. Put the time phrase exactly as said "
     "in \"when\" (e.g. \"in 20m\", \"at 7pm\", \"tomorrow 9am\", \"sat 3pm\") and the thing in \"what\".\n"
+    "  Put who should get the reminder in \"who\": \"me\" if it's for the person asking, the person's name if "
+    "it's for someone else (\"remind tom to...\" -> \"tom\"), or \"everyone\" for the whole chat. Keep \"what\" as "
+    "they said it.\n"
     "- \"lookup\": answering needs current or outside information. {bot_name}'s own knowledge stops in 2023, so "
     "this includes: scores, schedules, news, prices, weather, hours, who won, precise stats/dates; anything about "
     "current players, rosters, injuries, trades, rookies or this season; fantasy sports (start/sit, waivers, "
@@ -239,6 +251,7 @@ INTENT_SCHEMA = {
         "prompt": {"type": "string"},
         "when": {"type": "string"},
         "what": {"type": "string"},
+        "who": {"type": "string"},
     },
     "required": ["action"],
 }
@@ -250,6 +263,7 @@ class Intent:
     prompt: str = ""
     when: str = ""
     what: str = ""
+    who: str = ""  # remind: "me", a name from the chat, or "everyone"
 
 
 _IMAGE_VERB = r"\b(make|draw|generate|create|render|paint|sketch|send|show|give|cook up|whip up|do|gimme|get)\b"
@@ -325,7 +339,7 @@ def parse_intent(raw: str) -> Intent:
     if action not in ("chat", "image", "remind", "lookup", "forget", "gif", "tweet"):
         action = "chat"
     g = lambda k: str(data.get(k) or "").strip()[:600]
-    intent = Intent(action, g("prompt"), g("when"), g("what"))
+    intent = Intent(action, g("prompt"), g("when"), g("what"), g("who")[:40])
     if intent.action in ("image", "gif", "tweet") and not intent.prompt:
         return Intent()
     if intent.action == "remind" and not (intent.when and intent.what):

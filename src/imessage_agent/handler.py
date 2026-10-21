@@ -35,6 +35,7 @@ from .llm import (
     AFTERWORD_SUFFIX,
     CONSISTENCY_RULE,
     REFUSAL_ROASTS,
+    REMINDER_SYSTEM,
     SELF_ONLY_RULE,
     UNANSWERED_GIF_SYSTEM,
     afterword_ok,
@@ -709,7 +710,7 @@ class Agent:
             return
         if intent.action == "remind" and self.reminders is not None:
             log_event("intent", chat_guid=chat_guid, kind="remind")
-            await self._handle_remind(chat_guid, who, f"{intent.when} {intent.what}")
+            await self._handle_remind(chat_guid, who, f"{intent.when} {intent.what}", for_whom=intent.who)
             return
         if intent.action == "forget":
             log_event("intent", chat_guid=chat_guid, kind="forget")
@@ -891,7 +892,26 @@ class Agent:
             log_event("voice.failed", chat_guid=chat_guid, error=exc_name(exc))
         await self._say(chat_guid, text, remember=remember)
 
-    async def _handle_remind(self, chat_guid: str, who: str, arg: str) -> None:
+    async def _remind_target(self, chat_guid: str, raw: str, trusted: bool = False) -> str | None:
+        """'' for the asker, 'everyone', a chat member's name, or None if it isn't a person.
+        trusted: the router named this person, so an unknown name is still a name."""
+        t = " ".join((raw or "").lower().replace("@", "").split())
+        if t in ("", "me", "myself", "i", "self"):
+            return ""
+        if t in ("everyone", "everybody", "us", "all", "yall", "y'all", "all of us", "the chat", "the group", "the gc", "guys"):
+            return "everyone"
+        names = list(await self._chat_members(chat_guid)) + [n for n in self.s.sender_names.values() if n]
+        exact = [n for n in names if n.lower() == t]
+        if exact:
+            return exact[0]
+        first = {n for n in names if n.split(" ")[0].lower() == t}
+        if len(first) == 1:
+            return first.pop()
+        if first or (trusted and re.fullmatch(r"[a-z][a-z' -]{0,30}", t)):
+            return raw.strip().title()  # "chris" with two Chrises: keep it as said
+        return None
+
+    async def _handle_remind(self, chat_guid: str, who: str, arg: str, for_whom: str | None = None) -> None:
         if self.reminders is None:
             await self._say(chat_guid, "reminders are off on my end", remember=False)
             return
@@ -900,6 +920,20 @@ class Agent:
             ok = self.reminders.cancel(chat_guid, int(m.group(1)))
             await self._say(chat_guid, "dropped it" if ok else "no reminder with that number here", remember=False)
             return
+        target = await self._remind_target(chat_guid, for_whom, trusted=True) if for_whom is not None else ""
+        if for_whom is None:
+            # /remind tom at 7pm pay max back / /remind everyone in 20m ...
+            words = arg.split()
+            for n in (2, 1):
+                if len(words) > n:
+                    t = await self._remind_target(chat_guid, " ".join(words[:n]))
+                    if t is not None and (t or words[0].lower() in ("me", "myself")):
+                        target, arg = t, " ".join(words[n:])
+                        break
+        if target is None:
+            target = ""
+        if target and target.split(" ")[0].lower() == (who or "").split(" ")[0].lower():
+            target = ""  # "remind max" from max is "remind me"
         now = datetime.now().astimezone()
         due, what = parse(arg, now)
         if due is None or not what.strip():
@@ -908,18 +942,20 @@ class Agent:
         if due - now > timedelta(days=MAX_DAYS_AHEAD):
             await self._say(chat_guid, f"that's too far out, i only do {MAX_DAYS_AHEAD} days", remember=False)
             return
-        r = self.reminders.add(chat_guid, who, what.strip(), due.timestamp())
+        r = self.reminders.add(chat_guid, who, what.strip(), due.timestamp(), for_whom=target)
         if r is None:
             await self._say(chat_guid, "this chat has too many reminders pending, cancel some first", remember=False)
             return
-        plain = f"got it {who}, i'll remind you {describe(due, now)} (#{r.id})"
         when = describe(due, now)
+        whom = "you" if not target else "y'all" if target == "everyone" else target.split(" ")[0]
+        plain = random.choice((f"bet, i'll bug {whom} {when}", f"got it, i'll remind {whom} {when}",
+                               f"say less, i'll hit {whom} up {when}")) + f" (#{r.id} if you wanna cancel)"
         hour = re.search(r"\d+", when)
         await self._say_in_voice(
             chat_guid,
-            f"got it {who}, i'll remind you here {when}, that's #{r.id}",
+            f"got it {who}, i'll remind {whom} here {when}, that's #{r.id} if they want to cancel",
             plain,
-            keep=(hour.group(0) if hour else "", f"{r.id}"),
+            keep=(hour.group(0) if hour else "", f"{r.id}") + ((whom,) if target else ()),
         )
 
     async def _handle_reminders(self, chat_guid: str) -> None:
@@ -931,7 +967,8 @@ class Agent:
             await self._say(chat_guid, "nothing pending here", remember=False)
             return
         now = datetime.now().astimezone()
-        lines = [f"#{r.id} {describe(datetime.fromtimestamp(r.due).astimezone(), now)}: {r.text} ({r.who})" for r in items[:15]]
+        lines = [f"#{r.id} {describe(datetime.fromtimestamp(r.due).astimezone(), now)}: "
+                 f"{(r.for_whom.split(' ')[0] + ': ') if r.for_whom else ''}{r.text} ({r.who})" for r in items[:15]]
         await self._say(chat_guid, "\n".join(lines), remember=False)
 
     async def _handle_task(self, chat_guid: str, who: str, request: str, address: str | None = None) -> None:
@@ -1056,7 +1093,37 @@ class Agent:
             log_event("task.notify_failed", error=exc_name(exc))
 
     async def fire_reminder(self, r: Reminder) -> None:
-        await self._say(r.chat_guid, f"⏰ {r.who}: {r.text}")
+        """Time's up: tell the right person, in the bot's voice. The timing was exact; the wording isn't."""
+        setter = (r.who or "someone").split(" ")[0]
+        target = setter if not r.for_whom else "everyone" if r.for_whom == "everyone" else r.for_whom.split(" ")[0]
+        text = ""
+        if not self._muted(r.chat_guid):
+            setup = (f"{setter} asked you to remind themself." if not r.for_whom else
+                     f"{setter} asked you to remind the whole chat." if r.for_whom == "everyone" else
+                     f"{setter} asked you to remind {target}.")
+            system = (REMINDER_SYSTEM.replace("{persona}", self.s.persona).replace("{setup}", setup)
+                      .replace("{what}", r.text)
+                      .replace("{target}", "the whole chat (say 'yall' or 'everybody', don't list or make up names)"
+                               if target == "everyone" else target)
+                      .replace("{setter}", setter))
+            try:
+                async with self._llm_gate:
+                    raw = await self.llm.reply(system, [{"role": "user", "content": "(send it)"}])
+                text = strip_fake_notes(clean_reply(raw, self.s.bot_name)).strip()
+            except Exception as exc:  # noqa: BLE001
+                log_event("reminder.voice_failed", error=exc_name(exc))
+            needed = re.findall(r"\d+(?:[:.,]\d+)*", r.text)
+            if (not text or len(text) > 300 or is_refusal(text) or any(n not in text for n in needed)
+                    or not facts_kept(text, r.text)  # no made-up times or amounts
+                    or (target != "everyone" and target.lower() not in text.lower())):
+                text = ""
+        if not text:
+            what = r.text if not r.for_whom else _from_their_side(r.text, setter)
+            text = (random.choice((f"yo {setter}, you told me to remind you: {what}", f"{setter}. {what}. you asked me to bug you"))
+                    if not r.for_whom else
+                    f"everybody: {what}. {setter}'s orders" if r.for_whom == "everyone" else
+                    random.choice((f"{target}, {what}. {setter} told me to remind you", f"yo {target}, reminder from {setter}: {what}")))
+        await self._say(r.chat_guid, text)
 
     def _system_for(self, chat_guid: str) -> str:
         """Persona plus whatever notes the bot keeps about this chat."""
@@ -1750,6 +1817,13 @@ class Agent:
         self._unanswered.clear()
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
+
+
+def _from_their_side(text: str, setter: str) -> str:
+    """'pay me back' set by Max, said to Tom: 'pay Max back'."""
+    t = re.sub(r"\bmy\b", f"{setter}'s", text, flags=re.IGNORECASE)
+    t = re.sub(r"\b(me|myself)\b", setter, t, flags=re.IGNORECASE)
+    return re.sub(r"^\s*to\s+", "", t)
 
 
 def _local_hour() -> int:

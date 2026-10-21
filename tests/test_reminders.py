@@ -72,18 +72,17 @@ async def test_remind_command_round_trip(tmp_path):
                   resolver=SenderResolver(None, {"+15550001111": "Alex"}, use_contacts=False),  # type: ignore[arg-type]
                   reminders=store)
     assert await agent.process(message("/remind in 45m call the dentist", guid="r1")) == "handled:remind"
-    assert bb.texts[-1][1].startswith("got it Alex, i'll remind you in 45 min (#1)")
+    assert bb.texts[-1][1].endswith("in 45 min (#1 if you wanna cancel)")
     assert await agent.process(message("/reminders", guid="r2")) == "handled:reminders"
     assert "#1" in bb.texts[-1][1] and "call the dentist" in bb.texts[-1][1] and "(Alex)" in bb.texts[-1][1]
     assert await agent.process(message("/remind nonsense", guid="r3")) == "handled:remind"
     assert bb.texts[-1][1].startswith("say it like")
     assert await agent.process(message("/remind cancel 1", guid="r4")) == "handled:remind"
     assert bb.texts[-1][1] == "dropped it" and store.pending(ALLOWED) == []
-    # firing posts in the chat with the asker's name
+    # firing: the model's line didn't name Alex, so a natural fallback that does
     r = store.add(ALLOWED, "Alex", "call the dentist", due=0)
     await agent.fire_reminder(r)
-    assert bb.texts[-1] == (ALLOWED, "⏰ Alex: call the dentist")
-    assert llm.calls == []
+    assert "Alex" in bb.texts[-1][1] and "call the dentist" in bb.texts[-1][1] and "⏰" not in bb.texts[-1][1]
     # reminders are not stored as chat context
     assert all("dentist" not in m.text for m in ctx.get(ALLOWED) if not m.from_bot)
 
@@ -116,3 +115,54 @@ async def test_scheduler_fires_due_reminders(tmp_path):
     except asyncio.CancelledError:
         pass
     assert fired == ["ping"]
+
+
+async def test_reminders_for_someone_else_and_everyone(tmp_path):
+    from unittest import mock
+
+    s = make_settings()
+    bb, llm = FakeBB(), FakeLLM("tom you still owe max 20 bucks, pay up before he cries")
+    store = ReminderStore(str(tmp_path / "r.json"))
+    agent = Agent(s, bb, llm, ContextStore(5, 3600), images=None,  # type: ignore[arg-type]
+                  resolver=SenderResolver(None, {"+15550001111": "Max"}, use_contacts=False), reminders=store)
+    agent._participants[ALLOWED] = (1e18, ["Max", "Tom O'Brien", "Chris Oddo", "Chris Schiavello"])
+    with mock.patch("imessage_agent.handler.time.monotonic", return_value=0.0):
+        await agent.process(message("/remind tom at 11:59pm pay me the 20 bucks", guid="t1"))
+    r = store.pending(ALLOWED)[0]
+    assert r.for_whom == "Tom O'Brien" and r.text == "pay me the 20 bucks" and r.who == "Max"
+    assert "tom" in bb.texts[-1][1].lower() and "#1 if you wanna cancel" in bb.texts[-1][1]
+    await agent.fire_reminder(r)
+    assert bb.texts[-1][1] == "tom you still owe max 20 bucks, pay up before he cries"
+    # the model drops the amount: the fallback keeps it and says it from Max's side
+    llm.reply_text = "tom pay up already"
+    await agent.fire_reminder(r)
+    assert bb.texts[-1][1] in ("Tom, pay Max the 20 bucks. Max told me to remind you", "yo Tom, reminder from Max: pay Max the 20 bucks")
+    # everyone
+    await agent.process(message("/remind everyone in 20m leave for the game", guid="t2"))
+    game = next(x for x in store.pending(ALLOWED) if x.text == "leave for the game")
+    assert game.for_whom == "everyone" and "y'all" in bb.texts[-1][1]
+    # two Chrises: "chris" stays as said
+    assert await agent._remind_target(ALLOWED, "chris") == "Chris"
+    assert await agent._remind_target(ALLOWED, "in") is None
+
+
+async def test_router_reminder_for_tom(clock, tmp_path):
+    from tests.test_handler import RoutingLLM
+
+    llm = RoutingLLM('{"action": "remind", "when": "at 11:58pm", "what": "bring the cooler", "who": "tom"}')
+    store = ReminderStore(str(tmp_path / "r.json"))
+    agent = Agent(make_settings(), FakeBB(), llm, ContextStore(5, 3600, clock=clock), images=None,  # type: ignore[arg-type]
+                  resolver=SenderResolver(None, {"+15550001111": "Max"}, use_contacts=False), reminders=store)
+    agent._participants[ALLOWED] = (1e18, ["Max", "Tom O'Brien"])
+    await agent.process(message("coco remind tom to bring the cooler at 11:58pm", guid="rt"))
+    assert store.pending(ALLOWED)[0].for_whom == "Tom O'Brien"
+
+
+async def test_fired_reminder_cannot_add_numbers(tmp_path):
+    from imessage_agent.reminders import Reminder
+
+    bb, llm = FakeBB(), FakeLLM("yall leave for the game at 6:30, joe's on the field by 7")
+    agent = Agent(make_settings(), bb, llm, ContextStore(5, 3600), images=None,  # type: ignore[arg-type]
+                  resolver=SenderResolver(None, {}, use_contacts=False))
+    await agent.fire_reminder(Reminder(1, ALLOWED, "Joe Minopoli", "leave for the game at 6:30", 0, 0, "everyone"))
+    assert bb.texts[-1][1] == "everybody: leave for the game at 6:30. Joe's orders"

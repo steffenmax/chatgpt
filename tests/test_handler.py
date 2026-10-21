@@ -408,7 +408,7 @@ async def test_natural_language_reminder_sets_one(clock, tmp_path):
     store = ReminderStore(str(tmp_path / "r.json"))
     agent = Agent(s, bb, llm, ctx, images=None, resolver=SenderResolver(None, {"+15550001111": "Alex"}, use_contacts=False), reminders=store)  # type: ignore[arg-type]
     assert await agent.process(message("coco remind me in half an hour to call the dentist", guid="n2")) == "handled:mention"
-    assert bb.texts[-1][1].startswith("got it Alex, i'll remind you in 30 min")
+    assert "in 30 min (#1 if you wanna cancel)" in bb.texts[-1][1]
     assert [r.text for r in store.pending(ALLOWED)] == ["call the dentist"]
 
 
@@ -489,13 +489,13 @@ async def test_voice_ack_rejects_garbled_or_refusing_phrasings(clock, tmp_path):
         await agent.process(message("/remind in 45m call mom", guid="va" + str(abs(hash(model_says)))))
         return bb.texts[-1][1]
 
-    plain = "got it Max, i'll remind you in 45 min (#1)"
+    plain = "in 45 min (#1 if you wanna cancel)"  # the fallback (random opener)
     # what llama actually said in testing: drops the facts and refuses
-    assert await run("can't, you gotta text max yourself, tell him to meet us at the bar at 7") == plain
+    assert (await run("can't, you gotta text max yourself, tell him to meet us at the bar at 7")).endswith(plain)
     # keeps facts but adds a refusal
-    assert await run("i can't set reminders but 45 min, #1") == plain
+    assert (await run("i can't set reminders but 45 min, #1")).endswith(plain)
     # drops the reminder number
-    assert await run("bet max, 45 min and i'll yell at you") == plain
+    assert (await run("bet max, 45 min and i'll yell at you")).endswith(plain)
     # a good in-voice line is used
     assert await run("bet max, 45 min from now i'm on you, that's #1") == "bet max, 45 min from now i'm on you, that's #1"
 
@@ -506,7 +506,7 @@ async def test_voice_ack_rejects_role_confused_echoes(clock, tmp_path):
     from tests.conftest import FakeBB, FakeLLM, make_settings
 
     s = make_settings(voice_acks=True)
-    plain = "got it Max, i'll remind you in 45 min (#1)"
+    plain = "in 45 min (#1 if you wanna cancel)"
     for i, said in enumerate(["max: hey coco, confirm that reminder #1 is saved in 45 min",
                               "coco here, 45 min, #1",
                               "the plain version is: got it max, 45 min, #1"]):
@@ -515,7 +515,7 @@ async def test_voice_ack_rejects_role_confused_echoes(clock, tmp_path):
         agent = Agent(s, bb, FakeLLM(said), ContextStore(5, 3600, clock=clock), images=None,
                       resolver=SenderResolver(None, {"+15550001111": "Max"}, use_contacts=False), reminders=store)  # type: ignore[arg-type]
         await agent.process(message("/remind in 45m call mom", guid=f"ec{i}"))
-        assert bb.texts[-1][1] == plain, said
+        assert bb.texts[-1][1].endswith(plain), said
 
 
 
