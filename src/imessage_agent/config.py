@@ -223,6 +223,15 @@ class Settings(BaseSettings):
         start, end = int(m.group(1)) % 24, int(m.group(2)) % 24
         return start <= hour < end if start <= end else (hour >= start or hour < end)  # wraps midnight
 
+    # --- Resy reservations (resy.py): anyone can ask; it books once N people say yes ---
+    resy_enabled: bool = False
+    resy_auth_token: str = ""  # the owner's login token, copied from a logged-in resy.com tab
+    resy_api_key: str = "VbWk7s3L4KiK5fzlO7JD3Q5EYolJI7n5"  # Resy's public web-client key
+    resy_lat: float = 40.7128
+    resy_lon: float = -74.006
+    resy_yes_minutes: float = Field(default=15.0, ge=1.0, le=120.0)
+    resy_owner_name: str = "Max"  # whose account and card the bookings go on
+
     # --- Kalshi prediction-market odds (kalshi.py): public data, no key, read-only ---
     kalshi_enabled: bool = False
 
@@ -341,6 +350,8 @@ class Settings(BaseSettings):
             hosts.append(("Links shared in allowlisted chats", "any website:443"))
             hosts.append(("X posts and replies (shared X links)",
                           "api.fxtwitter.com:443" if self.link_x_replies else "cdn.syndication.twimg.com:443"))
+        if self.resy_enabled:
+            hosts.append(("Resy (restaurant search; bookings on the owner's account)", "api.resy.com:443"))
         if self.kalshi_enabled:
             hosts.append(("Kalshi market data (read-only, no account)", "api.elections.kalshi.com:443"))
         if self.giphy_api_key:

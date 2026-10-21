@@ -155,7 +155,8 @@ def create_app(settings: Settings | None = None, agent: Agent | None = None, env
         env_path = env_path or Path(str(settings.model_config.get("env_file") or ".env")).resolve()
     install_logging(
         settings.log_level,
-        secrets=[settings.bluebubbles_password, settings.webhook_secret, settings.anthropic_api_key, settings.openai_api_key],
+        secrets=[settings.bluebubbles_password, settings.webhook_secret, settings.anthropic_api_key, settings.openai_api_key,
+                 settings.resy_auth_token, settings.x_bearer_token, settings.giphy_api_key],
     )
 
     @asynccontextmanager
@@ -220,7 +221,7 @@ def create_app(settings: Settings | None = None, agent: Agent | None = None, env
                 await ag.images.stop()
             await ag.stop_task()
             await ag.drain()
-            for client in (ag.links, ag.gifs, ag.tweets, getattr(ag, "espn", None), getattr(ag, "kalshi", None)):
+            for client in (ag.links, ag.gifs, ag.tweets, getattr(ag, "espn", None), getattr(ag, "kalshi", None), getattr(ag, "resy", None)):
                 if client is not None:
                     await client.aclose()
             ag.context.forget_all()  # context never survives a restart
@@ -421,6 +422,12 @@ def _build_agent(settings: Settings) -> Agent:
             busy=agent.bookie.waiting_on_results if agent.bookie is not None else None,
             field_goals=settings.sports_field_goals,
         )
+    if settings.resy_enabled:
+        from .resy import Resy
+
+        agent.resy = Resy(settings.resy_auth_token, settings.resy_api_key, settings.resy_lat, settings.resy_lon,
+                          bookings_path=str(Path(settings.memory_dir or "~/Library/Application Support/imessage-agent/memory")
+                                            .expanduser().parent / "resy-bookings.json"))
     if settings.kalshi_enabled:
         from .kalshi import Kalshi
 

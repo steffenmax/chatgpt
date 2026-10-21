@@ -79,6 +79,7 @@ from .alerts import Alert
 from .bookie import Bookie, odds_line, parse_bet
 from .media import GifSearch, TweetFinder, clean_query, describe_tweet, gif_from_reaction
 from .kalshi import Kalshi, format_odds, wants_kalshi
+from .resy import Booking, Resy, is_yes, parse_request, pick_slot, wants_cancel, wants_resy
 from .likeness import Likenesses, blocked
 from .voice import SOUND_TAGS, VoiceSynth, new_workdir, repeat_last, strip_tags, wants_voice
 from .recap import RECAP_SYSTEM, gather, wants_recap, window_from
@@ -212,6 +213,7 @@ class Agent:
         likenesses: Likenesses | None = None,
         voice: VoiceSynth | None = None,
         kalshi: Kalshi | None = None,
+        resy: Resy | None = None,
     ):
         self.s = settings
         self.bb = bb
@@ -243,6 +245,9 @@ class Agent:
         self.voice = voice
         # Optional read-only Kalshi market odds.
         self.kalshi = kalshi
+        # Optional Resy bookings, and the per-chat vote waiting on yes's.
+        self.resy = resy
+        self._resy_pending: dict[str, dict[str, Any]] = {}
         self._link_reads: dict[str, set[asyncio.Task]] = {}
         self._task_job: asyncio.Task | None = None
         self._task_chat: str | None = None
@@ -370,6 +375,10 @@ class Agent:
             if urls:
                 has_link = True
                 self._read_links(chat_guid, stored, urls)
+        # a reservation waiting on yes's: a plain "yes" from someone counts toward it
+        if trigger.kind in ("none", "mention") and chat_guid in self._resy_pending and is_yes(re.sub(rf"\b{re.escape(self.s.bot_name)}\b,?", "", strip_cards(text), flags=re.IGNORECASE)):
+            await self._resy_yes(chat_guid, sender, address)
+            return "handled:resy_yes"
         if trigger.kind in ("none", "mention", "ask"):
             self._maybe_update_memory(chat_guid)
             if chat_guid in self._pending:  # the chat is still going: let it settle before replying
@@ -397,7 +406,11 @@ class Agent:
             return "stored"
 
         # "ricky 50 on the jets" is a bet, "ricky catch me up" a recap, not chat
-        if trigger.kind == "mention" and wants_enhance(text):
+        if trigger.kind == "mention" and self.resy is not None and wants_cancel(text) and self.resy.bookings():
+            trigger = Trigger("resy_cancel", text)
+        elif trigger.kind == "mention" and self.resy is not None and wants_resy(text):
+            trigger = Trigger("resy", text)
+        elif trigger.kind == "mention" and wants_enhance(text):
             trigger = Trigger("enhance", text)
         elif trigger.kind == "mention" and self._bookie_here(chat_guid) and parse_bet(text):
             trigger = Trigger("bet", text)
@@ -442,6 +455,10 @@ class Agent:
                 await self._handle_image(chat_guid, trigger.arg)
             elif trigger.kind in ("optout", "optin"):
                 await self._handle_opt(chat_guid, address, trigger.kind == "optin")
+            elif trigger.kind == "resy":
+                await self._handle_resy(chat_guid, sender, address, trigger.arg)
+            elif trigger.kind == "resy_cancel":
+                await self._handle_resy_cancel(chat_guid, sender, address, trigger.arg)
             elif trigger.kind == "enhance":
                 await self._handle_enhance(chat_guid, sender, trigger.arg, thread if isinstance(thread, str) else None, stored)
             elif trigger.kind == "kalshi":
@@ -1540,6 +1557,118 @@ class Agent:
         if not line or len(line) > 160 or is_refusal(line) or not afterword_ok(facts, line):
             return ""
         return line
+
+    async def _handle_resy(self, chat_guid: str, who: str, address: str | None, text: str) -> None:
+        resy = self.resy
+        if resy is None:
+            await self._say(chat_guid, "resy's not hooked up", remember=False)
+            return
+        pending = self._resy_pending.get(chat_guid)
+        if pending and time.monotonic() < pending["expires"]:
+            await self._say(chat_guid, f"still holding {pending['venue'].name} for a vote, finish that first "
+                                       f"({len(pending['yes'])}/{pending['need']} yes's)", remember=False)
+            return
+        req = parse_request(text, datetime.now().date(), self.s.bot_name)
+        if isinstance(req, str):
+            await self._say(chat_guid, req, remember=False)
+            return
+        try:
+            venue = await resy.find_venue(req.venue)
+            slots = await resy.slots(venue, req.day, req.party) if venue else []
+        except Exception as exc:  # noqa: BLE001
+            log_event("resy.failed", chat_guid=chat_guid, error=exc_name(exc))
+            await self._say(chat_guid, "resy's not answering right now, try in a bit", remember=False)
+            return
+        if venue is None:
+            await self._say(chat_guid, f"can't find {req.venue} on resy", remember=False)
+            return
+        from .resy import _fmt_time
+        best, others = pick_slot(slots, req.minutes)
+        link = venue.link(req.day, req.party)
+        if best is None:
+            if others:
+                await self._say(chat_guid, f"{venue.name} has nothing near {_fmt_time(req.minutes)} {req.when.split(' ')[0]} for "
+                                           f"{req.party}. closest open: {', '.join(_fmt_time(o.minutes) for o in others)}. "
+                                           "ask again with one of those")
+            else:
+                await self._say(chat_guid, f"{venue.name} is fully booked {req.when.rsplit(' ', 1)[0]} for {req.party}. {link}")
+            return
+        when = f"{best.start.strftime('%a %b %-d')} {_fmt_time(best.minutes)}"
+        head = f"{venue.name}, {when} for {req.party} is open" + (f" ({best.kind.lower()})" if best.kind else "") + "."
+        if best.minutes != req.minutes:
+            head += f" closest to {_fmt_time(req.minutes)}."
+        if others:
+            head += f" also open: {', '.join(_fmt_time(o.minutes) for o in others)}."
+        fee = best.fee_line(req.party, self.s.resy_owner_name)
+        if not resy.can_book:
+            await self._say(chat_guid, "\n".join(x for x in (head, fee, f"i can't book without {self.s.resy_owner_name}'s resy "
+                                                                       f"login, grab it here: {link}") if x))
+            return
+        need = req.party
+        mins = int(self.s.resy_yes_minutes)
+        pending = {"venue": venue, "slot": best, "party": req.party, "when": when, "need": need, "yes": {},
+                   "requested_by": who, "requester": _norm_addr(address) or who, "link": link,
+                   "expires": time.monotonic() + mins * 60, "id": uuid.uuid4().hex[:6]}
+        self._resy_pending[chat_guid] = pending
+        # the fee goes before the count, so nobody says yes without knowing it
+        await self._say(chat_guid, "\n".join(x for x in (head, fee, f"need {need} yes's in the next {mins} min to lock it in "
+                                                                   f"(0/{need})") if x))
+        log_event("resy.held", chat_guid=chat_guid, count=need)
+        self._spawn(self._resy_expire(chat_guid, pending["id"], mins * 60))
+
+    async def _resy_expire(self, chat_guid: str, pid: str, after: float) -> None:
+        await asyncio.sleep(after)
+        pending = self._resy_pending.get(chat_guid)
+        if pending and pending["id"] == pid:
+            self._resy_pending.pop(chat_guid, None)
+            await self._say(chat_guid, f"time's up, only {len(pending['yes'])}/{pending['need']} yes's. let the "
+                                       f"{pending['venue'].name} table go", remember=False)
+
+    async def _resy_yes(self, chat_guid: str, who: str, address: str | None) -> None:
+        pending = self._resy_pending.get(chat_guid)
+        if not pending or time.monotonic() >= pending["expires"]:
+            return
+        key = _norm_addr(address) or who
+        if key in pending["yes"]:
+            return  # one yes per person
+        pending["yes"][key] = who
+        got, need = len(pending["yes"]), pending["need"]
+        if got < need:
+            await self._say(chat_guid, f"{got}/{need}", remember=False)
+            return
+        self._resy_pending.pop(chat_guid, None)
+        venue = pending["venue"]
+        try:
+            token, rid = await self.resy.book(pending["slot"], pending["party"])  # type: ignore[union-attr]
+        except Exception as exc:  # noqa: BLE001
+            log_event("resy.book_failed", chat_guid=chat_guid, error=exc_name(exc))
+            await self._say(chat_guid, f"{need}/{need} but resy wouldn't take it (they may have given the table away). "
+                                       f"book it here: {pending['link']}")
+            return
+        items = self.resy.bookings()  # type: ignore[union-attr]
+        items.append(Booking(chat_guid, venue.name, pending["when"], pending["party"], token, rid, pending["requested_by"]))
+        self.resy.save_bookings(items)  # type: ignore[union-attr]
+        log_event("resy.booked", chat_guid=chat_guid, count=pending["party"])
+        await self._say(chat_guid, f"{need}/{need}, locked in 🔒 {venue.name} {pending['when']} for {pending['party']}, under "
+                                   f"{self.s.resy_owner_name}'s name. ('{self.s.bot_name.lower()} cancel the {venue.name.lower()} "
+                                   f"res' if plans change)")
+
+    async def _handle_resy_cancel(self, chat_guid: str, who: str, address: str | None, text: str) -> None:
+        items = self.resy.bookings() if self.resy is not None else []  # type: ignore[union-attr]
+        mine = [b for b in items if b.chat == chat_guid]
+        target = next((b for b in reversed(mine) if b.venue.lower() in text.lower()), mine[-1] if mine else None)
+        if target is None:
+            await self._say(chat_guid, "no reservation of mine to cancel in here", remember=False)
+            return
+        try:
+            await self.resy.cancel(target.resy_token)  # type: ignore[union-attr]
+        except Exception as exc:  # noqa: BLE001
+            log_event("resy.cancel_failed", chat_guid=chat_guid, error=exc_name(exc))
+            await self._say(chat_guid, f"resy wouldn't cancel {target.venue}, do it in the app", remember=False)
+            return
+        self.resy.save_bookings([b for b in items if b is not target])  # type: ignore[union-attr]
+        log_event("resy.cancelled", chat_guid=chat_guid)
+        await self._say(chat_guid, f"cancelled {target.venue} {target.when}. hope it was worth it")
 
     async def _enhance_target(self, chat_guid: str, text: str, thread: str | None, marker) -> tuple[str, str] | None:
         """(who, what they said) for 'enhance': the swiped message, the named person's last one, or the last one."""

@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-Kind = Literal["mention", "ask", "image", "help", "forget", "remind", "reminders", "task", "mute", "unmute", "gif", "tweet", "bet", "odds", "bets", "bank", "leaderboard", "bailout", "recap", "optout", "optin", "voice", "kalshi", "enhance", "none"]
+Kind = Literal["mention", "ask", "image", "help", "forget", "remind", "reminders", "task", "mute", "unmute", "gif", "tweet", "bet", "odds", "bets", "bank", "leaderboard", "bailout", "recap", "optout", "optin", "voice", "kalshi", "enhance", "resy", "resy_cancel", "none"]
 
 
 @dataclass(frozen=True)
@@ -129,6 +129,7 @@ def help_text(bot_name: str, image_enabled: bool, cloud_facts: bool = False, rem
         lines.append("- /reminders - what's pending, /remind cancel <n> - drop one")
     lines += [
         f"- \"{bot_name} send a voice note\", \"{bot_name} say that out loud\" or /voice <what> - i'll say it",
+        f"- \"{bot_name} get resy for carbone sat at 7 for 4\" - i find it, then it books once 4 of you say yes",
         f"- \"{bot_name} enhance\" (swipe-reply to a message, \"enhance tom's message\", or the last one) - i break down what they really meant",
         f"- \"{bot_name} catch me up\" or /recap (or /recap 3h) - what you missed in here",
         f"- \"{bot_name} chill\" or /mute 30m - i'll stay quiet in this chat (2 min unless you say how long), /unmute to bring me back",
