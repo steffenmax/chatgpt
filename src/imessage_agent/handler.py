@@ -73,6 +73,7 @@ from .logsafe import exc_name, log_event
 from .alerts import Alert
 from .bookie import Bookie, odds_line, parse_bet
 from .media import GifSearch, TweetFinder, clean_query, describe_tweet, gif_from_reaction
+from .kalshi import Kalshi, format_odds, wants_kalshi
 from .likeness import Likenesses, blocked
 from .voice import SOUND_TAGS, VoiceSynth, new_workdir, repeat_last, strip_tags, wants_voice
 from .recap import RECAP_SYSTEM, gather, wants_recap, window_from
@@ -205,6 +206,7 @@ class Agent:
         sports_fans: dict[str, list[str]] | None = None,
         likenesses: Likenesses | None = None,
         voice: VoiceSynth | None = None,
+        kalshi: Kalshi | None = None,
     ):
         self.s = settings
         self.bb = bb
@@ -234,6 +236,8 @@ class Agent:
         self.likenesses = likenesses
         # Optional local text-to-speech for voice notes.
         self.voice = voice
+        # Optional read-only Kalshi market odds.
+        self.kalshi = kalshi
         self._link_reads: dict[str, set[asyncio.Task]] = {}
         self._task_job: asyncio.Task | None = None
         self._task_chat: str | None = None
@@ -390,6 +394,8 @@ class Agent:
         # "ricky 50 on the jets" is a bet, "ricky catch me up" a recap, not chat
         if trigger.kind == "mention" and self._bookie_here(chat_guid) and parse_bet(text):
             trigger = Trigger("bet", text)
+        elif trigger.kind == "mention" and self.kalshi is not None and wants_kalshi(text):
+            trigger = Trigger("kalshi", text)
         elif trigger.kind == "mention" and wants_recap(text):
             trigger = Trigger("recap", text)
         elif trigger.kind == "mention" and self.voice is not None and wants_voice(text):
@@ -414,6 +420,7 @@ class Agent:
                         gifs=self.gifs is not None,
                         tweets=self.tweets is not None,
                         bookie=self._bookie_here(chat_guid),
+                        kalshi=self.kalshi is not None,
                     ),
                 )
             elif trigger.kind == "forget":
@@ -428,6 +435,8 @@ class Agent:
                 await self._handle_image(chat_guid, trigger.arg)
             elif trigger.kind in ("optout", "optin"):
                 await self._handle_opt(chat_guid, address, trigger.kind == "optin")
+            elif trigger.kind == "kalshi":
+                await self._handle_kalshi(chat_guid, trigger.arg)
             elif trigger.kind == "voice":
                 await self._handle_voice(chat_guid, trigger.arg, stored)
             elif trigger.kind == "recap":
@@ -1452,6 +1461,29 @@ class Agent:
         if not line or len(line) > 160 or is_refusal(line) or not afterword_ok(facts, line):
             return ""
         return line
+
+    async def _handle_kalshi(self, chat_guid: str, query: str) -> None:
+        if self.kalshi is None:
+            await self._say(chat_guid, "no kalshi hookup on me", remember=False)
+            return
+        query = re.sub(rf"\b{re.escape(self.s.bot_name)}\b", " ", query, flags=re.IGNORECASE).strip()
+        if not query:
+            await self._say(chat_guid, "kalshi odds on what? like /kalshi knicks title", remember=False)
+            return
+        try:
+            res = await self.kalshi.search(query)
+        except Exception as exc:  # noqa: BLE001
+            log_event("kalshi.failed", chat_guid=chat_guid, error=exc_name(exc))
+            await self._say(chat_guid, "kalshi's not answering right now, try in a bit", remember=False)
+            return
+        if res is None:
+            await self._say(chat_guid, "kalshi doesn't have a market on that", remember=False)
+            return
+        facts = format_odds(*res)
+        comment = await self._sports_comment(chat_guid, facts, "Give your own quick take on these odds: is it a lock, a "
+                                             "steal, or a joke? Name anyone in the chat it's about. One short line.")
+        await self._say(chat_guid, facts + (f"\n{comment}" if comment else ""))
+        log_event("kalshi.sent", chat_guid=chat_guid)
 
     async def _handle_voice(self, chat_guid: str, text: str, marker) -> None:
         """'send a voice note' / '/voice <what>' (a new reply, spoken) or 'say that out loud' (the last one)."""

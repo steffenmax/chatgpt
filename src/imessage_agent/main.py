@@ -186,6 +186,13 @@ def create_app(settings: Settings | None = None, agent: Agent | None = None, env
             if getattr(ag, "sports_poller", None) is not None
             else None
         )
+        if getattr(ag, "kalshi", None) is not None:  # build the search index now, not on the first question
+            async def _warm():
+                try:
+                    await ag.kalshi._ensure_index()
+                except Exception:  # noqa: BLE001
+                    pass
+            asyncio.create_task(_warm(), name="kalshi-index")
         reminder_task = (
             asyncio.create_task(ag.reminders.run(ag.fire_reminder), name="reminders")
             if ag.reminders is not None
@@ -213,7 +220,7 @@ def create_app(settings: Settings | None = None, agent: Agent | None = None, env
                 await ag.images.stop()
             await ag.stop_task()
             await ag.drain()
-            for client in (ag.links, ag.gifs, ag.tweets, getattr(ag, "espn", None)):
+            for client in (ag.links, ag.gifs, ag.tweets, getattr(ag, "espn", None), getattr(ag, "kalshi", None)):
                 if client is not None:
                     await client.aclose()
             ag.context.forget_all()  # context never survives a restart
@@ -414,6 +421,10 @@ def _build_agent(settings: Settings) -> Agent:
             busy=agent.bookie.waiting_on_results if agent.bookie is not None else None,
             field_goals=settings.sports_field_goals,
         )
+    if settings.kalshi_enabled:
+        from .kalshi import Kalshi
+
+        agent.kalshi = Kalshi()
     if settings.voice_enabled:
         from .voice import VoiceSynth, parse_pronunciations
 

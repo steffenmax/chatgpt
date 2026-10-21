@@ -223,6 +223,9 @@ class Settings(BaseSettings):
         start, end = int(m.group(1)) % 24, int(m.group(2)) % 24
         return start <= hour < end if start <= end else (hour >= start or hour < end)  # wraps midnight
 
+    # --- Kalshi prediction-market odds (kalshi.py): public data, no key, read-only ---
+    kalshi_enabled: bool = False
+
     # --- voice notes (voice.py): local text-to-speech, sent as an audio attachment ---
     voice_enabled: bool = False
     voice_command: str = "~/.local/bin/mlx_audio.tts.generate"
@@ -338,6 +341,8 @@ class Settings(BaseSettings):
             hosts.append(("Links shared in allowlisted chats", "any website:443"))
             hosts.append(("X posts and replies (shared X links)",
                           "api.fxtwitter.com:443" if self.link_x_replies else "cdn.syndication.twimg.com:443"))
+        if self.kalshi_enabled:
+            hosts.append(("Kalshi market data (read-only, no account)", "api.elections.kalshi.com:443"))
         if self.giphy_api_key:
             hosts.append(("GIPHY (GIF search, words from the chat)", "api.giphy.com:443, media*.giphy.com:443"))
         if self.tweets_enabled and self.x_bearer_token:
