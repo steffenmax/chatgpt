@@ -70,7 +70,7 @@ const $ = (id) => document.getElementById(id);
 const pill = (ok, yes="on", no="off", cls) => `<span class="pill ${cls || (ok ? "ok" : "off")}">${ok ? yes : no}</span>`;
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const row = (k, v) => `<div class="row"><span class="k">${k}</span><span class="v">${v}</span></div>`;
-let state = null, memIndex = 0, memDirty = false;
+let state = null, memIndex = 0, memDirty = false, memDiscardArmed = null;
 
 function fmtUptime(started) {
   const s = Math.max(0, Date.now()/1000 - started), d = Math.floor(s/86400), h = Math.floor(s%86400/3600), m = Math.floor(s%3600/60);
@@ -103,7 +103,13 @@ async function refresh() {
     + row("Memory notes", f.memory ? `every ${f.memory_update_every} msgs` : pill(false)) + row("Reminders", pill(f.reminders)) + row("Acks in voice", pill(f.voice_acks))
     + row("/task agent", f.task ? `${pill(true, "on", "", "warn")} <span class="note">${f.task_chats} chat(s), $${f.task_budget_usd} cap each</span>` : pill(false));
   $("memtabs").innerHTML = state.chats.map(c => `<button class="${c.index === memIndex ? "on" : ""}" data-i="${c.index}">${esc(c.label)}</button>`).join("");
-  $("memtabs").querySelectorAll("button").forEach(b => b.onclick = () => { if (memDirty && !confirm("Discard unsaved edits?")) return; memIndex = +b.dataset.i; memDirty = false; loadMemory(); refresh(); });
+  $("memtabs").querySelectorAll("button").forEach(b => b.onclick = () => {
+    const i = +b.dataset.i;
+    if (i === memIndex) return;
+    // no confirm(): the app's browser pane silently answers "cancel" to popups
+    if (memDirty && memDiscardArmed !== i) { memDiscardArmed = i; $("mempath").textContent = "unsaved edits here: click that tab again to discard them, or Save first"; return; }
+    memDiscardArmed = null; memIndex = i; memDirty = false; loadMemory(); refresh();
+  });
   const rem = state.chats.flatMap(c => c.reminders.map(x => ({...x, chat: c.label, index: c.index}))).sort((a, b) => a.due - b.due);
   $("reminders").innerHTML = rem.length ? `<table><tr><th>When</th><th>Chat</th><th>Who</th><th>What</th><th></th></tr>` + rem.map(x => `<tr><td>${when(x.due)}</td><td>${esc(x.chat)}</td><td>${esc(x.who)}</td><td>${esc(x.text)}</td><td><button class="ghost" data-i="${x.index}" data-id="${x.id}">cancel</button></td></tr>`).join("") + `</table>` : '<span class="note">nothing pending</span>';
   $("reminders").querySelectorAll("button").forEach(b => b.onclick = async () => { await fetch(`/dashboard/api/reminders/${b.dataset.i}/${b.dataset.id}`, {method:"DELETE"}); refresh(); });
@@ -113,7 +119,7 @@ async function loadMemory() {
   if (!r.ok) { $("memtext").value = ""; $("mempath").textContent = "memory is off"; return; }
   const d = await r.json(); $("memtext").value = d.notes; $("mempath").textContent = d.path; memDirty = false;
 }
-$("memtext").addEventListener("input", () => memDirty = true);
+$("memtext").addEventListener("input", () => { memDirty = true; memDiscardArmed = null; if (!$("mempath").textContent.startsWith("• unsaved")) $("mempath").textContent = "• unsaved edits"; });
 $("memsave").onclick = async () => { const r = await fetch(`/dashboard/api/memory/${memIndex}`, {method:"PUT", headers:{"content-type":"application/json"}, body: JSON.stringify({notes: $("memtext").value})}); if (r.ok) { memDirty = false; $("mempath").textContent = "saved " + new Date().toLocaleTimeString(); refresh(); } };
 $("memreload").onclick = loadMemory;
 async function events() {

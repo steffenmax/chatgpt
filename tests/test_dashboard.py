@@ -106,3 +106,11 @@ def test_persona_not_written_without_an_env_path(tmp_path):
     with TestClient(app) as c:
         r = c.put("/dashboard/api/persona", json={"persona": "You are {bot_name}, a test persona."})
         assert r.json()["saved_to_env"] is False and agent.s.bot_persona == "You are {bot_name}, a test persona."
+
+
+def test_page_has_no_blocking_popups(tmp_path):
+    s, bb, agent, mem, rem, app = _app(tmp_path)
+    with TestClient(app) as c:
+        page = c.get("/dashboard").text
+    # the app's browser pane auto-cancels confirm()/alert(), which silently broke switching memory tabs
+    assert "confirm(" not in page.replace("no confirm()", "") and "alert(" not in page
