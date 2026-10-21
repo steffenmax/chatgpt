@@ -59,6 +59,7 @@ from .logsafe import exc_name, log_event
 from .alerts import Alert
 from .bookie import Bookie, odds_line, parse_bet
 from .media import GifSearch, TweetFinder, clean_query, describe_tweet, gif_from_reaction
+from .recap import RECAP_SYSTEM, gather, wants_recap, window_from
 from .sports import (ESPN, LEAGUES, Game, TeamIndex, fmt_odds, late_game, league_hint, live_odds, past_halfway,
                      too_late_to_bet)
 from .memory import MemoryStore
@@ -74,6 +75,8 @@ def _norm_addr(a: str | None) -> str:
     a = (a or "").strip().lower()
     return a if "@" in a else re.sub(r"[^\d+]", "", a)
 _ECHOED_INSTRUCTION = re.compile(r"^\s*\w+\s*:|plain version|confirm that|let(ting)? the chat know|\bthey should\b")
+RECAP_ACKS = ("one sec, scrolling up", "ugh fine, reading", "hold on, getting the tape", "pulling the receipts",
+              "give me a sec to catch up myself")
 BET_QUIPS = (
     "bold.", "the house thanks you", "i'll frame the receipt", "brave. stupid, but brave", "noted. in pen",
     "your funeral", "love the confidence", "this is how it starts", "i've seen worse. not many", "say less",
@@ -343,9 +346,11 @@ class Agent:
                 self._maybe_react(chat_guid)
             return "stored"
 
-        # "ricky 50 on the jets" is a bet, not chat
+        # "ricky 50 on the jets" is a bet, "ricky catch me up" a recap, not chat
         if trigger.kind == "mention" and self._bookie_here(chat_guid) and parse_bet(text):
             trigger = Trigger("bet", text)
+        elif trigger.kind == "mention" and wants_recap(text):
+            trigger = Trigger("recap", text)
         if trigger.kind in ("mention", "ask") and self._muted(chat_guid):
             log_event("trigger", chat_guid=chat_guid, kind=trigger.kind, status="muted")
             return "muted"
@@ -378,6 +383,8 @@ class Agent:
                 await self._handle_unmute(chat_guid)
             elif trigger.kind == "image":
                 await self._handle_image(chat_guid, trigger.arg)
+            elif trigger.kind == "recap":
+                await self._handle_recap(chat_guid, sender, address, trigger.arg)
             elif trigger.kind in ("bet", "odds", "bets", "bank", "leaderboard", "bailout"):
                 await self._handle_book(chat_guid, trigger.kind, trigger.arg, sender, address)
             elif trigger.kind == "gif":
@@ -1351,6 +1358,34 @@ class Agent:
         if not line or len(line) > 160 or is_refusal(line) or not afterword_ok(facts, line):
             return ""
         return line
+
+    async def _handle_recap(self, chat_guid: str, name: str, address: str | None, arg: str) -> None:
+        window = window_from(arg)
+        await self._say(chat_guid, random.choice(RECAP_ACKS), remember=False)
+        try:
+            lines, since = await gather(self.bb, self.resolver, self.s.bot_name, chat_guid, address, window, norm=_norm_addr)
+        except Exception as exc:  # noqa: BLE001
+            log_event("recap.failed", chat_guid=chat_guid, error=exc_name(exc))
+            await self._say(chat_guid, "can't pull up the history right now, scroll up like an animal", remember=False)
+            return
+        if len(lines) < 3:
+            await self._say(chat_guid, "nothing happened. you didn't miss a thing", remember=False)
+            return
+        system = (RECAP_SYSTEM.replace("{persona}", self.s.persona).replace("{asker}", name).replace("{since}", since))
+        try:
+            async with self._llm_gate:
+                raw = await self.llm.reply(system, [{"role": "user", "content": "\n".join(lines) + f"\n\nNow catch {name} up."}])
+        except Exception as exc:  # noqa: BLE001
+            log_event("recap.failed", chat_guid=chat_guid, error=exc_name(exc))
+            raw = ""
+        text = strip_fake_notes(clean_reply(raw, self.s.bot_name))
+        if not text or is_refusal(text):
+            await self._say(chat_guid, "too much went down, just scroll up", remember=False)
+            return
+        if len(text) > 900:
+            text = text[:900].rsplit("\n", 1)[0]
+        await self._say(chat_guid, text)
+        log_event("recap.sent", chat_guid=chat_guid, count=len(lines), chars=len(text))
 
     async def _handle_gif(self, chat_guid: str, query: str) -> None:
         if self.gifs is None:

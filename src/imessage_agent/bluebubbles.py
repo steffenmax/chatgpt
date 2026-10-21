@@ -119,6 +119,15 @@ class BlueBubblesClient:
         r = await self._client.get(f"/api/v1/message/{message_guid}", params=self._params())
         return self._unwrap(r) or {}
 
+    async def recent_messages(self, chat_guid: str, limit: int = 200, after_ms: int | None = None) -> list[dict[str, Any]]:
+        """The chat's latest messages, newest first (text, handle, isFromMe, dateCreated, attachments)."""
+        where = [{"statement": "chat.guid = :g", "args": {"g": chat_guid}}]
+        payload: dict[str, Any] = {"limit": limit, "sort": "DESC", "with": ["chat", "handle", "attachment"], "where": where}
+        if after_ms:
+            payload["after"] = after_ms
+        r = await self._client.post("/api/v1/message/query", params=self._params(), json=payload)
+        return self._unwrap(r) or []
+
     async def get_chat(self, chat_guid: str) -> dict[str, Any]:
         r = await self._client.get(f"/api/v1/chat/{chat_guid}", params=self._params(**{"with": "participants"}))
         return self._unwrap(r) or {}

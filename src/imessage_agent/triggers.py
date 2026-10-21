@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-Kind = Literal["mention", "ask", "image", "help", "forget", "remind", "reminders", "task", "mute", "unmute", "gif", "tweet", "bet", "odds", "bets", "bank", "leaderboard", "bailout", "none"]
+Kind = Literal["mention", "ask", "image", "help", "forget", "remind", "reminders", "task", "mute", "unmute", "gif", "tweet", "bet", "odds", "bets", "bank", "leaderboard", "bailout", "recap", "none"]
 
 
 @dataclass(frozen=True)
@@ -21,6 +21,7 @@ _COMMANDS = {
     "/gif": "gif", "/tweet": "tweet",
     "/bet": "bet", "/odds": "odds", "/bets": "bets", "/bank": "bank", "/balance": "bank",
     "/leaderboard": "leaderboard", "/board": "leaderboard", "/bailout": "bailout",
+    "/recap": "recap", "/catchup": "recap", "/tldr": "recap",
 }
 
 DEFAULT_MUTE_SECONDS = 2 * 60
@@ -124,6 +125,7 @@ def help_text(bot_name: str, image_enabled: bool, cloud_facts: bool = False, rem
         lines.append("- /remind in 20m <what>, /remind at 7pm <what>, /remind tomorrow 9am <what> - i'll post it here then")
         lines.append("- /reminders - what's pending, /remind cancel <n> - drop one")
     lines += [
+        f"- \"{bot_name} catch me up\" or /recap (or /recap 3h) - what you missed in here",
         f"- \"{bot_name} chill\" or /mute 30m - i'll stay quiet in this chat (2 min unless you say how long), /unmute to bring me back",
         "- /forget - wipe what i remember from this chat",
         "- /help - this",
