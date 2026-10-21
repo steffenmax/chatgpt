@@ -86,9 +86,9 @@ async def test_no_token_closest_time_and_failed_booking(clock, tmp_path):
     assert "i can't book without Max's resy login, grab it here: https://resy.com/cities/ny/carbone?date=" in bb.texts[-1][1]
     agent2, bb2, _ = _agent(clock, tmp_path / "x", times=("21:30", "22:00"))
     await agent2.process(message("coco get resy for carbone saturday at 6 for 2", guid="n2"))
-    assert "nothing near 6:00pm" in bb2.texts[-1][1] and "9:30pm, 10:00pm" in bb2.texts[-1][1]
+    assert "1) " in bb2.texts[-1][1] and "9:30pm" in bb2.texts[-1][1] and "10:00pm" in bb2.texts[-1][1]  # that day's times instead
     agent3, bb3, _ = _agent(clock, tmp_path / "y", book_ok=False, fee=0)
-    await agent3.process(message("coco get resy for carbone saturday at 6 for 1", guid="n3"))
+    await agent3.process(message("coco get resy for carbone saturday at 6 for 1", guid="n3"))  # 6:00 is open: held right away
     assert "heads up" not in bb3.texts[-1][1]  # no fee, no notice
     await agent3.process(message("yes", guid="n4"))
     assert "resy wouldn't take it" in bb3.texts[-1][1] and "resy.com/cities/ny/carbone" in bb3.texts[-1][1]
@@ -147,7 +147,7 @@ async def test_area_request_filled_in_over_messages_then_picked_and_voted(clock,
     assert bb.texts[-1][1] == "how many people?"
     assert await agent.process(message("4", guid="h2")) == "handled:resy_followup"  # no "coco" needed
     msg = bb.texts[-1][1]
-    assert msg.startswith(f"open {DAY.strftime('%a')} around 7:45pm in Hoboken for 4 (going with 7:45pm for pats game kickoff):")
+    assert msg.startswith("open for 4: in Hoboken,") and "(going with 7:45pm for pats game kickoff)" in msg
     assert msg.split("\n")[1].startswith("1) Pier Sports Pub") and "SRO Bar" in msg and "Lilia" not in msg  # sports bars first, Hoboken only
     assert await agent.process(message("2", guid="h3")) == "handled:resy_pick"
     assert "need 4 yes's" in bb.texts[-1][1]
@@ -164,3 +164,83 @@ async def test_followups_only_from_the_asker_and_only_when_relevant(clock, tmp_p
     assert await agent.process(message("lol", guid="f3")) == "stored"  # nothing about the res
     assert await agent.process(message("3", guid="f4")) == "handled:resy_followup"
     assert "need 3 yes's" in bb.texts[-1][1]
+
+
+class SpecLLM:
+    """Answers the request reader with fixed JSON; everything else gets a plain line."""
+
+    name = "fake"
+
+    def __init__(self, spec):
+        self.spec = spec
+
+    async def reply(self, system, messages, stop=None):
+        return json.dumps(self.spec) if "reservation" in system and "schema" in system else "ok"
+
+    async def healthy(self):
+        return True
+
+    async def aclose(self):
+        pass
+
+
+def fake_search(calls, cal=None):
+    venues = [("Sushi Katsuei West Village", "West Village", "Sushi"), ("Aria West Village", "West Village", "Italian"),
+              ("Sushi Nakazawa", "West Village", "Sushi"), ("Keens Steakhouse", "Herald Square", "Steakhouse")]
+
+    def handler(req: httpx.Request):
+        calls.append((req.method, req.url.path, dict(req.url.params)))
+        if req.url.path == "/3/venuesearch/search":
+            hits = [{"id": {"resy": i}, "name": n, "url_slug": n.lower().replace(" ", "-"), "neighborhood": hood, "locality": "New York",
+                     "cuisine": [c], "location": {"code": "ny", "name": "New York"}} for i, (n, hood, c) in enumerate(venues, 1)]
+            return httpx.Response(200, json={"search": {"hits": hits}})
+        if req.url.path == "/4/venue/calendar":
+            days = cal or []
+            return httpx.Response(200, json={"scheduled": [{"date": d, "inventory": {"reservation": "available"}} for d in days]})
+        if req.url.path == "/4/find":
+            d = req.url.params["day"]
+            slots = [{"date": {"start": f"{d} {t}:00"}, "config": {"token": f"t{req.url.params['venue_id']}{t}", "type": ""}, "payment": {}}
+                     for t in ("17:30", "19:45", "21:15")]
+            return httpx.Response(200, json={"results": {"venues": [{"slots": slots}]}})
+        return httpx.Response(404)
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+def _spec_agent(clock, tmp_path, spec, cal=None):
+    calls = []
+    bb = FakeBB()
+    agent = Agent(make_settings(), bb, SpecLLM(spec), ContextStore(15, 3600, clock=clock), images=None,  # type: ignore[arg-type]
+                  resolver=SenderResolver(None, NAMES, use_contacts=False),
+                  resy=Resy("TOKEN", bookings_path=str(tmp_path / "b.json"), client=fake_search(calls, cal)))
+    return agent, bb, calls
+
+
+async def test_cuisine_and_area(clock, tmp_path):
+    spec = {"restaurant": "", "cuisine": "sushi", "area": "west village", "day": "saturday", "time": "8pm", "party": 2,
+            "next_available": False, "game": ""}
+    agent, bb, calls = _spec_agent(clock, tmp_path, spec)
+    await agent.process(message("coco get us a table, sushi in the west village saturday at 8 for 2", guid="cs"))
+    msg = bb.texts[-1][1]
+    assert msg.startswith("open for 2: sushi in west village,") and "Sushi Katsuei West Village (sushi, West Village)" in msg
+    assert "Sushi Nakazawa" in msg and "Aria" not in msg and "Keens" not in msg and "7:45pm" in msg
+
+
+async def test_next_available_at_a_place_lists_its_times(clock, tmp_path):
+    soon = (datetime.now().date() + timedelta(days=3)).isoformat()
+    spec = {"restaurant": "keens steakhouse", "cuisine": "", "area": "", "day": "", "time": "", "party": 4,
+            "next_available": True, "game": ""}
+    agent, bb, calls = _spec_agent(clock, tmp_path, spec, cal=[soon])
+    await agent.process(message("coco next available at keens for 4", guid="na"))
+    msg = bb.texts[-1][1]
+    assert "next available" in msg and msg.count("\n") >= 3 and "7:45pm" in msg and "which one, Max?" in msg
+    assert any(c[1] == "/4/venue/calendar" for c in calls)
+    await agent.process(message("2", guid="na2"))
+    assert "need 4 yes's" in bb.texts[-1][1]
+
+
+async def test_day_without_time_shows_that_days_times(clock, tmp_path):
+    spec = {"restaurant": "", "cuisine": "steakhouse", "area": "", "day": "saturday", "time": "", "party": 6,
+            "next_available": False, "game": ""}
+    agent, bb, calls = _spec_agent(clock, tmp_path, spec)
+    await agent.process(message("coco resy at a steakhouse saturday for 6", guid="dd"))
+    assert "Keens Steakhouse (steakhouse, Herald Square)" in bb.texts[-1][1] and "7:45pm" in bb.texts[-1][1]

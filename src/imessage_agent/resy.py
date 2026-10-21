@@ -27,8 +27,9 @@ PUBLIC_KEY = "VbWk7s3L4KiK5fzlO7JD3Q5EYolJI7n5"  # the key resy.com's own web ap
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605.1.15 "
       "(KHTML, like Gecko) Version/17.0 Safari/605.1.15")
 
-RESY_ASK = re.compile(r"\b(resy|reservations?|rezzy|res for|res at|book (?:a |us a )?table|table for \d+|get (?:us )?a table)\b",
-                      re.IGNORECASE)
+RESY_ASK = re.compile(r"\b(resy|reservations?|rezzy|a res|res for|res at|book (?:a |us a )?(?:table|spot)|table for \w+|"
+                      r"get (?:us )?a table|find (?:us )?a table|next available|(?:dinner|lunch|brunch) for (?:\d+|two|three|"
+                      r"four|five|six|seven|eight))\b", re.IGNORECASE)
 CANCEL_ASK = re.compile(r"\bcancel\b.*\b(res|resy|reservation|table|booking)\b|\b(res|resy|reservation)\b.*\bcancel", re.IGNORECASE)
 YES = re.compile(r"^\s*(y|ya|yes+|yea+h?|yeah+|yup|yep|yessir|i'?m in|im in|count me in|in|down|bet|let'?s go+|lets go+|"
                  r"ok(?:ay)?|sure|sounds good|👍|🙋‍♂️|🙋)\s*[!.]*\s*$", re.IGNORECASE)
@@ -88,29 +89,36 @@ class Parts:
     wants_bar: bool = False  # "to watch the game"
     game: str = ""  # the "watch the pats game" bit, to look up kickoff
     guessed_time: str = ""  # "night" -> 7pm, said back so they can correct it
+    cuisine: str = ""  # "sushi", "steakhouse", "sports bar"
+    next_available: bool = False  # "next available", "whenever"
 
     def merge(self, newer: "Parts") -> "Parts":
-        for f in ("venue", "area", "day", "minutes", "party", "game", "guessed_time"):
+        for f in ("venue", "area", "day", "minutes", "party", "game", "guessed_time", "cuisine"):
             v = getattr(newer, f)
             if v not in (None, ""):
                 setattr(self, f, v)
         if newer.minutes is not None and not newer.guessed_time:
             self.guessed_time = ""
         self.wants_bar = self.wants_bar or newer.wants_bar
+        self.next_available = self.next_available or newer.next_available
         return self
 
     def missing(self) -> str | None:
-        if not self.venue and not self.area:
-            return "where? a spot (\"carbone\") or an area (\"in hoboken\")"
+        """Only what can't be searched without: something to look for, and how many people.
+        No day and no time means the next available; a day without a time means show that day's times."""
+        if not (self.venue or self.area or self.cuisine):
+            return "where or what? a spot (\"carbone\"), a kind of food (\"sushi\"), an area (\"in hoboken\"), or a mix"
         if self.party is None:
             return "how many people?"
-        if self.day is None:
-            return "what day?"
-        if self.minutes is None:
-            return "what time?"
         if not 1 <= self.party <= 20:
             return "party size has to be 1 to 20"
         return None
+
+    @property
+    def mode(self) -> str:
+        if self.next_available or (self.day is None and self.minutes is None):
+            return "next"
+        return "exact" if self.minutes is not None else "day"
 
     def request(self) -> "Request":
         return Request(self.venue or self.area, self.day, self.minutes, self.party)  # type: ignore[arg-type]
@@ -230,6 +238,13 @@ class Venue:
     city: str
     slug: str
     city_slug: str
+    cuisine: str = ""
+    neighborhood: str = ""
+
+    @property
+    def blurb(self) -> str:
+        bits = [b for b in (self.cuisine.lower(), self.neighborhood) if b]
+        return f" ({', '.join(bits)})" if bits else ""
 
     def link(self, day: date, party: int) -> str:
         return f"https://resy.com/cities/{self.city_slug}/{self.slug}?date={day.isoformat()}&seats={party}"
@@ -291,6 +306,61 @@ class Resy:
     async def aclose(self) -> None:
         await self._client.aclose()
 
+    @staticmethod
+    def _venue(h: dict[str, Any]) -> Venue:
+        loc = h.get("location") or {}
+        cuisine = h.get("cuisine")
+        cuisine = (cuisine[0] if cuisine else "") if isinstance(cuisine, list) else str(cuisine or "")
+        return Venue(int((h.get("id") or {}).get("resy")), str(h.get("name") or ""), str(loc.get("name") or h.get("locality") or ""),
+                     str(h.get("url_slug") or ""), str(loc.get("code") or "ny"), cuisine, str(h.get("neighborhood") or "").split(",")[0].strip())
+
+    async def search(self, query: str, per_page: int = 20) -> list[tuple[Venue, dict[str, Any]]]:
+        r = await self._client.post(f"{API}/3/venuesearch/search", json={
+            "query": query, "geo": {"latitude": self.lat, "longitude": self.lon}, "per_page": per_page, "types": ["venue"]})
+        r.raise_for_status()
+        return [(self._venue(h), h) for h in (r.json().get("search") or {}).get("hits") or [] if (h.get("id") or {}).get("resy")]
+
+    async def candidates(self, cuisine: str, area: str, wants_bar: bool = False, limit: int = 10) -> list[Venue]:
+        """Places matching a food type and/or an area (both if both given), best fits first."""
+        queries = [q for q in (f"{cuisine} {area}".strip(), area, cuisine) if q]
+        seen: dict[int, tuple[Venue, dict]] = {}
+        for q in dict.fromkeys(queries):
+            for v, h in await self.search(q, 30):
+                seen.setdefault(v.id, (v, h))
+        cw = [w for w in re.findall(r"[a-z]+", cuisine.lower()) if len(w) > 2]
+        aw = [w for w in re.findall(r"[a-z]+", area.lower()) if len(w) > 2]
+        out = []
+        for v, h in seen.values():
+            where = " ".join(str(x or "") for x in (h.get("locality"), h.get("neighborhood"), h.get("region"),
+                                                  (h.get("location") or {}).get("name"), v.name)).lower()
+            what = f"{v.name} {v.cuisine}".lower()
+            if aw and not all(w in where for w in aw):
+                continue
+            if cw and not any(w in what or (w.rstrip("s") in what) for w in cw):
+                continue
+            rank = 0
+            if wants_bar:
+                rank = (0 if re.search(r"sports|pub|tap\b|taproom|tavern|beer|brew|saloon", what) else
+                        1 if re.search(r"grill|\bbar\b", what) else 2 if "lounge" in what else 3)
+            out.append((rank, v))
+        out.sort(key=lambda x: x[0])
+        return [v for _, v in out[:limit]]
+
+    async def calendar(self, venue: Venue, party: int, start: date, days: int = 30) -> list[date]:
+        """Days in the next `days` with reservations open (Resy's availability calendar)."""
+        r = await self._client.get(f"{API}/4/venue/calendar", params={
+            "venue_id": venue.id, "num_seats": party, "start_date": start.isoformat(),
+            "end_date": (start + timedelta(days=days)).isoformat()})
+        r.raise_for_status()
+        out = []
+        for d in r.json().get("scheduled") or []:
+            if ((d.get("inventory") or {}).get("reservation")) == "available":
+                try:
+                    out.append(date.fromisoformat(d["date"]))
+                except (KeyError, ValueError):
+                    pass
+        return out
+
     async def find_venue(self, query: str) -> Venue | None:
         r = await self._client.post(f"{API}/3/venuesearch/search", json={
             "query": query, "geo": {"latitude": self.lat, "longitude": self.lon}, "per_page": 5, "types": ["venue"]})
@@ -298,10 +368,7 @@ class Resy:
         hits = (r.json().get("search") or {}).get("hits") or []
         if not hits:
             return None
-        h = hits[0]
-        loc = h.get("location") or {}
-        return Venue(int((h.get("id") or {}).get("resy")), str(h.get("name") or query), str(loc.get("name") or h.get("locality") or ""),
-                     str(h.get("url_slug") or ""), str(loc.get("code") or "ny"))
+        return self._venue(hits[0])
 
     async def area_options(self, area: str, day: date, party: int, minutes: int, wants_bar: bool = False,
                            limit: int = 3) -> list[tuple[Venue, Slot]]:
@@ -432,3 +499,92 @@ def pick_slot(slots: list[Slot], minutes: int, window: int = 45) -> tuple[Slot |
     best = ranked[0] if abs(ranked[0].minutes - minutes) <= window else None
     others = sorted([s for s in ranked[1:6] if s is not best], key=lambda s: s.minutes)[:3] if best else sorted(ranked[:3], key=lambda s: s.minutes)
     return best, others
+
+
+# --- understanding the request: food, restaurant, area, day, time, people -------------------------
+SPEC_SYSTEM = (
+    "Read one message asking a group-chat bot to find or book a restaurant reservation. Pull out what it says, "
+    "exactly as written, and answer ONLY with JSON matching the schema.\n"
+    "restaurant: a specific place's name if one is named (\"carbone\", \"4 charles prime rib\"), else \"\".\n"
+    "cuisine: a kind of food or place if asked for (\"sushi\", \"italian\", \"steakhouse\", \"sports bar\", \"rooftop\"), "
+    "else \"\".\n"
+    "area: a neighborhood, town or city if given (\"west village\", \"hoboken\", \"midtown\"), else \"\".\n"
+    "day: the day words as written (\"friday\", \"this saturday\", \"tomorrow\", \"10/31\", \"tonight\"), else \"\".\n"
+    "time: the time words as written (\"8pm\", \"7:30\", \"at 6\", \"dinner\", \"night\"), else \"\".\n"
+    "party: number of people as a number, 0 if not said.\n"
+    "next_available: true if they want the soonest open table (\"next available\", \"whenever\", \"soonest\", "
+    "\"any day\"), else false.\n"
+    "game: if they want to watch a game, the game words (\"pats game\"), else \"\"."
+)
+SPEC_SCHEMA = {"type": "object", "properties": {
+    "restaurant": {"type": "string"}, "cuisine": {"type": "string"}, "area": {"type": "string"}, "day": {"type": "string"},
+    "time": {"type": "string"}, "party": {"type": "integer"}, "next_available": {"type": "boolean"}, "game": {"type": "string"}},
+    "required": ["restaurant", "cuisine", "area", "day", "time", "party", "next_available", "game"]}
+
+
+def spec_from_model(raw: str, text: str, today: date, bot_name: str = "") -> Parts:
+    """The model's reading of the request, with day/time/party checked by the plain parser."""
+    base = parse_parts(text, today, bot_name)
+    try:
+        d = json.loads(raw[raw.index("{"): raw.rindex("}") + 1])
+    except (ValueError, TypeError):
+        return base
+    clean = lambda k: " ".join(str(d.get(k) or "").split())[:60]
+    restaurant, cuisine, area = clean("restaurant"), clean("cuisine"), clean("area")
+    if restaurant.lower() in (cuisine.lower(), area.lower()):
+        restaurant = ""
+    if not (restaurant or cuisine or area):  # the model missed it: trust the plain parser
+        return base
+    when = parse_parts(f"{clean('day')} {clean('time')}", today) if (clean("day") or clean("time")) else Parts()
+    party = d.get("party") if isinstance(d.get("party"), int) and 0 < d.get("party") <= 20 else base.party
+    game = clean("game") or base.game
+    return Parts(venue=restaurant, area=area, day=when.day or base.day,
+                 minutes=when.minutes if when.minutes is not None else base.minutes, party=party,
+                 wants_bar=bool(game) or "bar" in cuisine.lower() or base.wants_bar, game=game,
+                 guessed_time=when.guessed_time or base.guessed_time, cuisine=cuisine,
+                 next_available=bool(d.get("next_available")))
+
+
+async def find_options(resy: "Resy", p: Parts, now: datetime, limit: int = 4) -> list[tuple[Venue, Slot]]:
+    """Open (venue, slot) choices for a request, in the order to offer them.
+    exact: the slot nearest the time at each place; day: that day's times (one place) or the best time per
+    place; next: the soonest open day per place (Resy's calendar), then its times."""
+    today, mode = now.date(), p.mode
+    target = p.minutes if p.minutes is not None else 19 * 60
+    day = p.day
+    if mode == "exact" and day is None:
+        day = today if target > now.hour * 60 + now.minute + 30 else today + timedelta(days=1)
+    if p.venue:
+        v = await resy.find_venue(f"{p.venue} {p.area}".strip())
+        venues = [v] if v else []
+    else:
+        venues = await resy.candidates(p.cuisine, p.area, p.wants_bar)
+    single = bool(p.venue)
+    out: list[tuple[Venue, Slot]] = []
+    for v in venues[:8]:
+        try:
+            if mode == "next":
+                days = [d for d in await resy.calendar(v, p.party or 2, today) if d >= today][:2]
+                slots = []
+                for d in days:
+                    slots = [s for s in await resy.slots(v, d, p.party or 2) if s.start > now]
+                    if slots:
+                        break
+            else:
+                slots = [s for s in await resy.slots(v, day, p.party or 2) if s.start > now]  # type: ignore[arg-type]
+        except httpx.HTTPError:
+            continue
+        if not slots:
+            continue
+        if single and (mode != "exact" or pick_slot(slots, target, window=60)[0] is None):
+            # one place, flexible: several of its times, nearest the target first, shown in time order
+            near = sorted(sorted(slots, key=lambda s: abs(s.minutes - target))[:limit + 1], key=lambda s: s.start)
+            return [(v, s) for s in near]
+        best, _ = pick_slot(slots, target, window=60 if mode == "exact" else 24 * 60)
+        if best is not None:
+            out.append((v, best))
+        if len(out) >= limit:
+            break
+    if mode == "next":
+        out.sort(key=lambda vs: vs[1].start)
+    return out
