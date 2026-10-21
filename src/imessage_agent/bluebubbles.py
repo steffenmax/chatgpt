@@ -59,6 +59,16 @@ class BlueBubblesClient:
             raise BlueBubblesError(f"BlueBubbles API error (HTTP {resp.status_code})")
         return body.get("data") if isinstance(body, dict) else body
 
+    # -- attachments --
+    async def download_attachment(self, guid: str, max_bytes: int = 25 * 1024 * 1024) -> bytes:
+        """Raw bytes of an attachment (held in RAM only by the caller)."""
+        r = await self._client.get(f"/api/v1/attachment/{guid}/download", params=self._params())
+        if r.status_code != 200:
+            raise BlueBubblesError(f"attachment download failed (HTTP {r.status_code})")
+        if len(r.content) > max_bytes:
+            raise BlueBubblesError("attachment too large")
+        return r.content
+
     # -- server --
     async def ping(self) -> bool:
         r = await self._client.get("/api/v1/ping", params=self._params())
@@ -79,7 +89,8 @@ class BlueBubblesClient:
         r = await self._client.post("/api/v1/message/text", params=self._params(), json=payload)
         return self._unwrap(r) or {}
 
-    async def send_attachment(self, chat_guid: str, file_path: Path, name: str | None = None) -> dict[str, Any]:
+    async def send_attachment(self, chat_guid: str, file_path: Path, name: str | None = None,
+                              mime: str = "image/png") -> dict[str, Any]:
         name = name or file_path.name
         data = {
             "chatGuid": chat_guid,
@@ -88,7 +99,7 @@ class BlueBubblesClient:
             "method": self.send_method,
         }
         with file_path.open("rb") as fh:
-            files = {"attachment": (name, fh, "image/png")}
+            files = {"attachment": (name, fh, mime)}
             r = await self._client.post(
                 "/api/v1/message/attachment",
                 params=self._params(),
@@ -102,6 +113,19 @@ class BlueBubblesClient:
     async def list_chats(self, limit: int = 200, offset: int = 0) -> list[dict[str, Any]]:
         payload = {"limit": limit, "offset": offset, "with": ["participants", "lastMessage"], "sort": "lastmessage"}
         r = await self._client.post("/api/v1/chat/query", params=self._params(), json=payload)
+        return self._unwrap(r) or []
+
+    async def get_message(self, message_guid: str) -> dict[str, Any]:
+        r = await self._client.get(f"/api/v1/message/{message_guid}", params=self._params())
+        return self._unwrap(r) or {}
+
+    async def recent_messages(self, chat_guid: str, limit: int = 200, after_ms: int | None = None) -> list[dict[str, Any]]:
+        """The chat's latest messages, newest first (text, handle, isFromMe, dateCreated, attachments)."""
+        where = [{"statement": "chat.guid = :g", "args": {"g": chat_guid}}]
+        payload: dict[str, Any] = {"limit": limit, "sort": "DESC", "with": ["chat", "handle", "attachment"], "where": where}
+        if after_ms:
+            payload["after"] = after_ms
+        r = await self._client.post("/api/v1/message/query", params=self._params(), json=payload)
         return self._unwrap(r) or []
 
     async def get_chat(self, chat_guid: str) -> dict[str, Any]:

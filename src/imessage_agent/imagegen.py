@@ -1,4 +1,4 @@
-"""Local image generation with mflux (FLUX on Apple Silicon).
+"""Image generation: local mflux (FLUX on Apple Silicon) or OpenAI's image API.
 
 A single asyncio worker drains a queue so only one generation runs at a time.
 The prompt is handed to mflux via a 0600 temp file (--prompt-file) so it never shows
@@ -9,6 +9,7 @@ has been sent (or the job failed).
 from __future__ import annotations
 
 import asyncio
+import base64
 import os
 import random
 import shlex
@@ -17,7 +18,9 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Protocol
+
+import httpx
 
 from .logsafe import log_event, exc_name
 
@@ -32,9 +35,91 @@ class ImageJob:
     prompt: str
     job_id: str
     created: float = field(default_factory=time.monotonic)
+    # (LoRA path, scale): an opted-in person's likeness add-on (likeness.py); mflux only
+    loras: tuple[tuple[str, float], ...] = ()
+    caption: str = ""  # sent right after the picture
+
+
+class ImageGenerator(Protocol):
+    name: str
+
+    def available(self) -> bool: ...
+    async def generate(self, prompt: str, workdir: Path, loras: tuple[tuple[str, float], ...] = ()) -> Path: ...
+
+
+class OpenAIImageGenerator:
+    """OpenAI Images API (POST /v1/images/generations). The prompt leaves the Mac.
+
+    The PNG comes back base64-encoded in the response and is written to `workdir`
+    with the same lifecycle as the mflux output (sent, then deleted).
+    """
+
+    name = "openai"
+    BASE_URL = "https://api.openai.com"
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "gpt-image-1",
+        size: str = "1024x1024",
+        quality: str = "medium",
+        timeout: float = 120.0,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ):
+        self.api_key = api_key
+        self.model = model
+        self.size = size
+        self.quality = quality
+        self._client = httpx.AsyncClient(
+            base_url=self.BASE_URL,
+            timeout=timeout,
+            headers={"Authorization": f"Bearer {api_key}"},
+            transport=transport,
+        )
+
+    def available(self) -> bool:
+        return bool(self.api_key)
+
+    async def generate(self, prompt: str, workdir: Path) -> Path:
+        payload = {"model": self.model, "prompt": prompt, "n": 1, "size": self.size, "quality": self.quality}
+        try:
+            r = await self._client.post("/v1/images/generations", json=payload)
+        except httpx.HTTPError as exc:
+            raise ImageGenError(f"openai request failed: {exc_name(exc)}") from exc
+        if r.status_code != 200:
+            code = ""
+            try:
+                code = str(((r.json().get("error") or {}).get("code")) or "")
+            except ValueError:
+                pass
+            if r.status_code == 400 and "moderation" in code:
+                raise ImageGenError("rejected")
+            raise ImageGenError(f"openai http {r.status_code}")
+        try:
+            b64 = r.json()["data"][0]["b64_json"]
+            png = base64.b64decode(b64)
+        except (ValueError, KeyError, IndexError, TypeError) as exc:
+            raise ImageGenError("openai response malformed") from exc
+        out = workdir / "image.png"
+        out.write_bytes(png)
+        os.chmod(out, 0o600)
+        return out
+
+    async def check(self) -> bool:
+        """Cheap key check (no image is generated)."""
+        try:
+            r = await self._client.get(f"/v1/models/{self.model}")
+            return r.status_code == 200
+        except httpx.HTTPError:
+            return False
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
 
 
 class MfluxGenerator:
+    name = "mflux"
+
     def __init__(
         self,
         command: str = "mflux-generate",
@@ -60,7 +145,8 @@ class MfluxGenerator:
             return Path(self.command).expanduser().is_file()
         return shutil.which(self.command) is not None
 
-    def _argv(self, prompt_file: Path | None, prompt: str | None, out: Path, seed: int) -> list[str]:
+    def _argv(self, prompt_file: Path | None, prompt: str | None, out: Path, seed: int,
+              loras: tuple[tuple[str, float], ...] = ()) -> list[str]:
         argv = [
             self.command,
             "--model", self.model,
@@ -77,6 +163,11 @@ class MfluxGenerator:
         else:
             argv += ["--prompt", prompt or ""]
         argv += self.extra_args
+        for path, scale in loras:
+            argv += ["--lora", path, str(scale)]
+        if loras:
+            # baking a LoRA into the quantized weights keeps only ~2% of it
+            argv.append("--no-bake-lora")
         return argv
 
     async def _run(self, argv: list[str], workdir: Path) -> tuple[int, str]:
@@ -95,9 +186,13 @@ class MfluxGenerator:
             proc.kill()
             await proc.wait()
             raise ImageGenError("timeout")
+        except asyncio.CancelledError:
+            proc.kill()
+            await proc.wait()
+            raise
         return proc.returncode or 0, (err or b"").decode(errors="replace")
 
-    async def generate(self, prompt: str, workdir: Path) -> Path:
+    async def generate(self, prompt: str, workdir: Path, loras: tuple[tuple[str, float], ...] = ()) -> Path:
         """Generate one image. Returns the PNG path inside `workdir`."""
         seed = random.randint(1, 2**31 - 1)
         out = workdir / "image.png"
@@ -105,10 +200,10 @@ class MfluxGenerator:
         prompt_file.write_text(prompt, encoding="utf-8")
         os.chmod(prompt_file, 0o600)
 
-        code, err = await self._run(self._argv(prompt_file, None, out, seed), workdir)
+        code, err = await self._run(self._argv(prompt_file, None, out, seed, loras), workdir)
         if code != 0 and "prompt-file" in err:
             # Older mflux without --prompt-file: fall back to passing the prompt directly.
-            code, err = await self._run(self._argv(None, prompt, out, seed), workdir)
+            code, err = await self._run(self._argv(None, prompt, out, seed, loras), workdir)
         try:
             prompt_file.unlink()
         except OSError:
@@ -129,23 +224,35 @@ class ImageQueue:
 
     def __init__(
         self,
-        generator: MfluxGenerator,
+        generator: ImageGenerator,
         sender: Callable[[ImageJob, Path], Awaitable[None]],
         on_failure: Callable[[ImageJob, str], Awaitable[None]],
         before_generate: Callable[[], Awaitable[None]] | None = None,
+        gate: asyncio.Semaphore | None = None,
     ):
         self.generator = generator
         self._sender = sender
         self._on_failure = on_failure
         self._before = before_generate
+        # Shared with the text backend: while held, no LLM reply runs, so the LLM
+        # unloaded by `before_generate` cannot be reloaded mid-generation (RAM).
+        self._gate = gate
         self._queue: asyncio.Queue[ImageJob] = asyncio.Queue()
         self._task: asyncio.Task | None = None
+        self._current: ImageJob | None = None
 
     def start(self) -> None:
         if self._task is None:
             self._task = asyncio.create_task(self._worker(), name="image-worker")
 
     async def stop(self) -> None:
+        # Whatever was generating or still waiting is lost with this process: say so,
+        # instead of leaving the chat waiting for a picture that never comes. Capture
+        # the running job before cancelling, since the worker clears it on cancel.
+        lost: list[ImageJob] = []
+        if self._current is not None:
+            lost.append(self._current)
+            self._current = None
         if self._task:
             self._task.cancel()
             try:
@@ -153,6 +260,18 @@ class ImageQueue:
             except asyncio.CancelledError:
                 pass
             self._task = None
+        while not self._queue.empty():
+            try:
+                lost.append(self._queue.get_nowait())
+                self._queue.task_done()
+            except asyncio.QueueEmpty:
+                break
+        for job in lost:
+            log_event("image.abandoned", chat_guid=job.chat_guid, job_id=job.job_id)
+            try:
+                await self._on_failure(job, "shutdown")
+            except Exception as exc:  # noqa: BLE001
+                log_event("image.failure_notify_failed", chat_guid=job.chat_guid, error=exc_name(exc))
 
     def qsize(self) -> int:
         return self._queue.qsize()
@@ -165,13 +284,21 @@ class ImageQueue:
     async def _worker(self) -> None:
         while True:
             job = await self._queue.get()
+            self._current = job
             started = time.monotonic()
             tmp = Path(tempfile.mkdtemp(prefix="imsg-img-"))
             os.chmod(tmp, 0o700)
             try:
-                if self._before:
-                    await self._before()
-                png = await self.generator.generate(job.prompt, tmp)
+                if self._gate is not None:
+                    await self._gate.acquire()
+                try:
+                    if self._before:
+                        await self._before()
+                    png = await (self.generator.generate(job.prompt, tmp, loras=job.loras) if job.loras
+                                 else self.generator.generate(job.prompt, tmp))
+                finally:
+                    if self._gate is not None:
+                        self._gate.release()
                 log_event(
                     "image.generated",
                     chat_guid=job.chat_guid,
@@ -181,10 +308,12 @@ class ImageQueue:
                 await self._sender(job, png)
             except Exception as exc:  # noqa: BLE001
                 log_event("image.failed", chat_guid=job.chat_guid, job_id=job.job_id, error=exc_name(exc))
+                reason = "rejected" if isinstance(exc, ImageGenError) and str(exc) == "rejected" else exc_name(exc)
                 try:
-                    await self._on_failure(job, exc_name(exc))
+                    await self._on_failure(job, reason)
                 except Exception as exc2:  # noqa: BLE001
                     log_event("image.failure_notify_failed", chat_guid=job.chat_guid, error=exc_name(exc2))
             finally:
+                self._current = None
                 shutil.rmtree(tmp, ignore_errors=True)
                 self._queue.task_done()

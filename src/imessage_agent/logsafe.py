@@ -33,6 +33,12 @@ SAFE_KEYS = frozenset(
         "error",  # exception class name only, never str(exc)
         "host",
         "purpose",
+        # daily brief / X pulls: counts and dollars only, never post text or queries
+        "source",
+        "posts",
+        "queries_ok",
+        "queries_failed",
+        "errors",
         "model",
         "backend",
         "duration_ms",
@@ -44,6 +50,9 @@ SAFE_KEYS = frozenset(
         "code",
         "attempt",
         "chars",  # length only
+        "cost_cents",
+        "turns",
+        "files",
     }
 )
 
@@ -61,6 +70,13 @@ class SecretRedactingFilter(logging.Filter):
                 s = s.replace(sec, "***")
         return s
 
+    def _scrub_arg(self, a):
+        # Keep non-string args (ints for %d, objects for %r) unless their text form
+        # contains a secret, e.g. an httpx URL object carrying ?secret=...
+        text = a if isinstance(a, str) else str(a)
+        scrubbed = self._scrub(text)
+        return scrubbed if (isinstance(a, str) or scrubbed != text) else a
+
     def filter(self, record: logging.LogRecord) -> bool:
         if not self._secrets:
             return True
@@ -69,9 +85,9 @@ class SecretRedactingFilter(logging.Filter):
                 record.msg = self._scrub(record.msg)
             if record.args:
                 if isinstance(record.args, dict):
-                    record.args = {k: self._scrub(str(v)) for k, v in record.args.items()}
+                    record.args = {k: self._scrub_arg(v) for k, v in record.args.items()}
                 else:
-                    record.args = tuple(self._scrub(str(a)) for a in record.args)
+                    record.args = tuple(self._scrub_arg(a) for a in record.args)
             if record.exc_text:
                 record.exc_text = self._scrub(record.exc_text)
         except Exception:  # never let logging crash the app
@@ -79,8 +95,33 @@ class SecretRedactingFilter(logging.Filter):
         return True
 
 
+class _RingHandler(logging.Handler):
+    """Keeps the last N formatted (already redacted) lines in memory for the dashboard."""
+
+    def __init__(self, capacity: int = 400):
+        super().__init__()
+        from collections import deque
+
+        self.lines = deque(maxlen=capacity)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self.lines.append(self.format(record))
+        except Exception:  # noqa: BLE001
+            pass
+
+
+_ring: _RingHandler | None = None
+
+
+def recent_lines(n: int = 200) -> list[str]:
+    if _ring is None:
+        return []
+    return list(_ring.lines)[-n:]
+
+
 def install_logging(level: str = "INFO", secrets: list[str] | None = None) -> None:
-    global _handler
+    global _handler, _ring
     root = logging.getLogger()
     root.setLevel(level.upper())
     if _handler is not None:
@@ -91,14 +132,20 @@ def install_logging(level: str = "INFO", secrets: list[str] | None = None) -> No
     redactor = SecretRedactingFilter(secrets or [])
     handler.addFilter(redactor)
     root.addHandler(handler)
+    if _ring is not None:
+        root.removeHandler(_ring)
+    _ring = _RingHandler()
+    _ring.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+    _ring.addFilter(redactor)
+    root.addHandler(_ring)
     # Make sure third-party loggers (uvicorn, httpx) also go through redaction.
-    for name in ("uvicorn", "uvicorn.error", "uvicorn.access", "httpx", "httpcore"):
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access", "httpx", "httpcore", "httpx2", "httpcore2"):
         lg = logging.getLogger(name)
         lg.handlers = []
         lg.propagate = True
     logging.getLogger("uvicorn.access").disabled = True
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    for name in ("httpx", "httpcore", "httpx2", "httpcore2"):
+        logging.getLogger(name).setLevel(logging.WARNING)
 
 
 def log_event(event: str, level: int = logging.INFO, **fields) -> None:

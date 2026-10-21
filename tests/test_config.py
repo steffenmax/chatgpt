@@ -28,3 +28,17 @@ def test_validate_runtime_flags_problems():
     msgs = " ".join(s.validate_runtime())
     for key in ("WEBHOOK_SECRET", "BLUEBUBBLES_PASSWORD", "HOST", "ALLOWED_CHAT_GUIDS"):
         assert key in msgs
+
+
+def test_cloud_facts_needs_key_and_lists_host():
+    from tests.conftest import make_settings
+
+    s = make_settings(cloud_facts_enabled=True, anthropic_api_key="")
+    assert any("CLOUD_FACTS_ENABLED" in p for p in s.validate_runtime())
+    s = make_settings(cloud_facts_enabled=True, anthropic_api_key="sk-ant-x")
+    assert not any("CLOUD_FACTS" in p for p in s.validate_runtime())
+    hosts = dict(s.outbound_hosts())
+    assert hosts["Anthropic API (fact lookups)"] == "api.anthropic.com:443"
+    assert s.any_cloud
+    off = make_settings()
+    assert "Anthropic API (fact lookups)" not in dict(off.outbound_hosts()) and not off.any_cloud

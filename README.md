@@ -29,8 +29,15 @@ By default **no message content leaves the machine**. See [Privacy model](#priva
 |---|---|
 | Message contains the bot's name (`BOT_NAME`, whole word, `@` optional) | Replies, short and casual, using the last N messages of that chat as context (with sender names) |
 | `/image <prompt>` | Replies "on it", queues a local FLUX job (one at a time), sends the PNG back, deletes the file |
+| `/ask <question>` | Only with `CLOUD_FACTS_ENABLED=true`: answers via the Anthropic API with web search |
+| A question (`...?`) nobody answers for `QUIET_QUESTION_SECONDS` | Treated as addressed to the bot (off by default) |
+| An inline reply to one of the bot's messages | Treated as talking to the bot, no name needed |
+| Any other message | Sometimes gets a short text reaction (`REACTION_CHANCE`, off by default) |
+| `/remind in 20m <what>`, `/remind at 7pm <what>`, `/remind tomorrow 9am <what>`, `/reminders`, `/remind cancel <n>` | With `REMINDERS_FILE`: posts the reminder in that chat at the time, naming who asked |
+| `/task <job>` | With `TASK_ENABLED`, from `TASK_CHAT_GUIDS` only: Claude researches it with web tools and a sandbox folder, then texts back (and attaches any doc it wrote) |
 | `/forget` | Wipes that chat's context immediately |
 | `/help` | Lists commands |
+| A photo | With `VISION_MODEL`: captioned locally and remembered as `[photo: ...]` so the bot can talk about it |
 | Anything else | Ignored (but remembered in the rolling context so replies make sense) |
 
 - Only responds in chats listed in `ALLOWED_CHAT_GUIDS`. Other chats that try are logged **by GUID only** so you can add them.
@@ -175,6 +182,32 @@ tail -f ~/Library/Logs/imessage-agent/agent.log
 
 The LaunchAgent starts at login, restarts on crash (`KeepAlive`), and logs to `~/Library/Logs/imessage-agent/`. `scripts/install-launchd.sh uninstall` removes it. The Mac must be logged into the bot's user session for Messages.app to run; disable sleep in System Settings → Energy (or Displays → Advanced on laptops) and consider auto-login for that user.
 
+## Dashboard
+
+With `DASHBOARD_ENABLED=true`, open <http://127.0.0.1:8765/dashboard> (your `PORT`) on the bot Mac: BlueBubbles/Ollama status and which models are loaded, every outbound host marked local or REMOTE, the allowlisted chats and their members, the memory notes per chat (editable in place), pending reminders with cancel, and a live feed of the event log. It is served by the bot process on the loopback port, so nothing is exposed beyond this Mac.
+
+## Daily culture brief
+
+With `BRIEF_ENABLED=true`, every morning at `BRIEF_TIME` the bot rebuilds a list of 10 to 15 one-line references to what's trending and being joked about in `BRIEF_TOPICS`. They're added to the bot's prompt for up to three days with an instruction to use them only when they fit. View, edit or refresh it from the dashboard.
+
+Where it comes from (`BRIEF_SOURCE`, default `auto`):
+
+| Source | What happens | Needs | Cost |
+|---|---|---|---|
+| `web` | The task agent searches the web with a generic prompt (no chat content) | `ANTHROPIC_API_KEY` | a few cents a day |
+| `x` | Each topic becomes one X recent search; the most-engaged posts of the last `X_LOOKBACK_HOURS` are written up by the cloud model, or by the local Ollama model if there's no Anthropic key | `X_BEARER_TOKEN` | X credits only: $0.005 per post, about $0.53 a day with the defaults |
+| `both` | The X posts are handed to the task agent as grounding and it web-searches to fill in context | both keys | both of the above |
+
+`auto` picks `both` when both keys are set, `x` with only an X token, `web` with only an Anthropic key.
+
+**X setup.** Create a project and app at <https://developer.x.com>, buy or use your pay-per-use credits, and copy the app's **Bearer Token** into `X_BEARER_TOKEN`. X bills per post returned, so each query asks for exactly `X_POSTS_PER_QUERY` posts and a refresh never requests more than `X_MAX_USD_PER_REFRESH` worth. The default topics map to seven hand-tuned queries; your own `BRIEF_TOPICS` are split into one search per `;`-separated item (a parenthesised list becomes an OR group), or set `X_QUERIES` to write the searches yourself. Nothing from the chats is ever sent to X. Check before spending:
+
+```bash
+uv run imessage-agent brief --plan
+```
+
+prints the exact queries and the estimated cost per refresh. `brief --pull` runs the pulls once and prints the post digest (costs one refresh's worth); plain `brief` does a full refresh and writes the file. The dashboard shows the estimated spend since the first pull, kept in `x-spend.json` next to the brief file. Your X Developer Console balance is the truth.
+
 ## CLI
 
 | Command | Purpose |
@@ -185,6 +218,7 @@ The LaunchAgent starts at login, restarts on crash (`KeepAlive`), and logs to `~
 | `imessage-agent register-webhook [--replace]` | Create the BlueBubbles webhook for `new-message` |
 | `imessage-agent send --chat <guid> "text"` | Send a test message |
 | `imessage-agent health` | Query `GET /health` on the running server |
+| `imessage-agent brief [--plan\|--pull]` | Refresh the culture brief now; `--plan` previews the X queries and cost, `--pull` fetches the posts and prints them |
 
 `GET http://127.0.0.1:8765/health` returns status, BlueBubbles/Ollama reachability, backend name, cloud flag, image queue length, and how many chats currently hold context.
 
@@ -196,6 +230,12 @@ The LaunchAgent starts at login, restarts on crash (`KeepAlive`), and logs to `~
 |---|---|---|---|
 | Message text of allowlisted chats | RAM of the bot process (`ContextStore`), max N per chat | Until 6 h idle, `/forget`, or process restart | No (unless cloud text mode is on) |
 | Message text of all chats the bot account is in | Messages.app `chat.db` and BlueBubbles' own SQLite under `~/Library/Application Support/bluebubbles-server` | Apple/BlueBubbles retention; not controlled by this bot | Only via Apple's iMessage delivery (end-to-end encrypted); Messages in iCloud should be off for the bot account |
+| Notes about people and the group (`MEMORY_DIR`, off by default) | Markdown files, one per chat, 0600 | Until you delete or edit them | No |
+| Photos people send (`VISION_MODEL`) | RAM, plus a 0600 temp file for one local `sips` conversion; the caption joins the rolling context | Deleted right after captioning | No |
+| `/task` requests (`TASK_ENABLED`) | Sent with recent context to api.anthropic.com; notes the agent writes stay in `TASK_DIR` (0700) for 14 days; agent session transcripts deleted after each task | 14 days | Yes, request and context |
+| Image prompts with `IMAGE_BACKEND=openai` | Sent to api.openai.com for that one request | OpenAI's retention | Yes, the prompt only |
+| Pending reminders (`REMINDERS_FILE`, off by default) | One JSON file, 0600 | Until they fire or are cancelled | No |
+| Culture brief X pulls (`X_BEARER_TOKEN`) | Search queries from config go to api.x.com; the returned public posts stay in RAM, the written brief is a 0600 file, and `x-spend.json` holds counts and dollars only | Brief: until the next refresh; spend ledger: until you delete it | Yes, the configured queries only, never chat content |
 | Image prompts | RAM; a `0600` temp file in a `0700` temp dir for the duration of one mflux run | Deleted when the job finishes | No, ever |
 | Generated images | Temp dir until sent, then sent through BlueBubbles to iMessage | Deleted right after sending | Only to the chat that asked |
 | Bot replies | Sent through BlueBubbles; kept in RAM context like any other message | As above | Only to the chat |
@@ -205,6 +245,10 @@ The LaunchAgent starts at login, restarts on crash (`KeepAlive`), and logs to `~
 **What is logged:** event type, chat GUID, message GUID, command kind, durations, queue length, HTTP status, exception class names, timestamps. The logging helper only accepts an allow-list of field names and raises if code tries to log anything else; a filter additionally scrubs all three secrets from every record (including URLs inside HTTP exceptions). uvicorn's access log is disabled because it would print the webhook query string. Tests assert that message text, prompts, bot replies and secrets never appear in captured logs.
 
 **Network:** the process opens connections only to the hosts printed at startup: BlueBubbles (`127.0.0.1:1234`), Ollama (`127.0.0.1:11434`) and, only if `CLOUD_LLM_ENABLED=true`, `api.anthropic.com:443`. The server refuses to bind to anything but loopback. There is no telemetry, update check, crash reporter or analytics. Model downloads (`ollama pull`, mflux's first run) are separate one-time downloads of public weights.
+
+**OpenAI images (`IMAGE_BACKEND=openai`, default `mflux`):** `/image` prompts go to OpenAI's image API instead of local FLUX. Much faster and no RAM contention with the LLM, but the prompt leaves the Mac and each image is billed. Needs `OPENAI_API_KEY`; a boxed warning is printed at startup.
+
+**Cloud fact lookups (`CLOUD_FACTS_ENABLED=true`, default off):** a lighter middle ground. Replies stay local unless the local model judges that the last message needs outside or current information (scores, news, schedules, prices), or someone uses `/ask`. Only those mentions send the triggering message plus that chat's rolling context to the Anthropic API, which answers with web search (`CLOUD_FACTS_MAX_SEARCHES` per reply). The log records every escalation as `event=llm.escalate` with the reason (`router` or `command`). Needs `ANTHROPIC_API_KEY` and `uv sync --extra cloud`.
 
 **Cloud text mode (`CLOUD_LLM_ENABLED=true`, default off):** the triggering message plus that chat's rolling context (sender names and text) are sent to the Anthropic API to produce the text reply. Nothing else changes: images are always generated locally, the allowlist/TTL/logging rules still apply, and a boxed warning is printed at startup. Install the optional dependency with `uv sync --extra cloud`.
 

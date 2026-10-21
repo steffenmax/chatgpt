@@ -25,15 +25,29 @@ class FakeBB:
         self.texts.append((chat_guid, text))
         return {"guid": "sent"}
 
-    async def send_attachment(self, chat_guid, file_path: Path, name=None):
+    async def send_attachment(self, chat_guid, file_path: Path, name=None, mime="image/png"):
         self.attachments.append((chat_guid, file_path, file_path.read_bytes()))
+        self.mimes = getattr(self, "mimes", []) + [mime]
         return {"guid": "sent-att"}
+
+    async def get_message(self, guid):
+        # messages BlueBubbles knows about; the bot's own have isFromMe
+        msg = getattr(self, "known_messages", {}).get(guid)
+        if msg is None:
+            raise RuntimeError("not found")
+        return msg
 
     async def ping(self):
         return True
 
     async def query_contacts(self, addresses):
         return []
+
+    async def download_attachment(self, guid, max_bytes=0):
+        self.downloads = getattr(self, "downloads", []) + [guid]
+        if guid == "missing":
+            raise RuntimeError("404")
+        return b"\xff\xd8fakejpeg"
 
     async def aclose(self):
         pass
@@ -48,6 +62,7 @@ class FakeLLM:
 
     async def reply(self, system, messages):
         self.calls.append(messages)
+        self.system = system
         return self.reply_text
 
     async def healthy(self):
@@ -79,6 +94,7 @@ def make_settings(**over) -> Settings:
         context_ttl_seconds=3600,
         context_max_messages=5,
         image_enabled=True,
+        voice_acks=False,
     )
     base.update(over)
     return Settings(**base)

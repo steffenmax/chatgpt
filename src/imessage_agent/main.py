@@ -3,22 +3,36 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 import hmac
 import sys
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
 from .bluebubbles import BlueBubblesClient
 from .config import Settings
+from .memory import MemoryStore
+from .reminders import ReminderStore
+from .brief import CultureBrief
+from .task import TaskRunner
+from .linkreader import LinkReader
+from .alerts import SportsAlerts, parse_teams
+from .bookie import Bookie
+from .media import GifSearch, TweetFinder
+from .sports import ESPN
+from .vision import OllamaVision
 from .context import ContextStore
 from .egress import print_egress_report
 from .handler import Agent, SenderResolver
-from .imagegen import ImageQueue, MfluxGenerator
+from .imagegen import OpenAIImageGenerator, ImageQueue, MfluxGenerator
 from .llm import AnthropicBackend, OllamaBackend, TextBackend
 from .logsafe import exc_name, install_logging, log_event
+
+if TYPE_CHECKING:
+    from .xsearch import XSearch
 
 MAX_BODY_BYTES = 1_000_000
 
@@ -38,15 +52,111 @@ def build_llm(settings: Settings) -> TextBackend:
         max_tokens=settings.ollama_max_tokens,
         timeout=settings.ollama_timeout_seconds,
         keep_alive=settings.ollama_keep_alive,
+        num_ctx=settings.ollama_num_ctx,
     )
 
 
-def create_app(settings: Settings | None = None, agent: Agent | None = None) -> FastAPI:
+def build_cloud(settings: Settings) -> TextBackend | None:
+    """Second backend for fact lookups. None unless CLOUD_FACTS_ENABLED (and not full cloud mode)."""
+    if settings.cloud_llm_enabled or not settings.cloud_facts_enabled:
+        return None
+    return AnthropicBackend(
+        api_key=settings.anthropic_api_key,
+        model=settings.lookup_model or settings.anthropic_model,
+        max_tokens=settings.anthropic_max_tokens,
+        timeout=settings.anthropic_timeout_seconds,
+        web_search=True,
+        max_searches=settings.cloud_facts_max_searches,
+    )
+
+
+def build_x(settings: Settings, brief_path: Path) -> XSearch | None:
+    """X pulls for the brief, or None when the brief doesn't use X."""
+    if not (settings.brief_enabled and settings.x_bearer_token and settings.resolved_brief_source in ("x", "both")):
+        return None
+    from .xsearch import XSearch
+
+    local_writer = settings.resolved_brief_source == "x" and not settings.anthropic_api_key
+    return XSearch(
+        settings.x_bearer_token,
+        settings.x_query_list(),
+        posts_per_query=settings.x_posts_per_query,
+        lookback_hours=settings.x_lookback_hours,
+        max_usd_per_refresh=settings.x_max_usd_per_refresh,
+        filters=settings.x_query_filters,
+        min_likes=settings.x_min_likes,
+        origin=settings.x_query_origin,
+        ledger_path=str(brief_path.parent / "x-spend.json"),
+        posts_path=str(brief_path.parent / "x-posts.json"),
+        # the local model's context window is small; the cloud writer can take it all
+        digest_max_chars=10000 if local_writer else 40000,
+    )
+
+
+def build_brief(settings: Settings) -> CultureBrief | None:
+    if not settings.brief_enabled:
+        return None
+    source = settings.resolved_brief_source
+    if source != "x" and not settings.anthropic_api_key:
+        return None
+    brief_path = Path(settings.brief_file or "~/Library/Application Support/imessage-agent/brief.md").expanduser()
+    x = build_x(settings, brief_path)
+    if x is None and source != "web":
+        return None
+    runner = writer = None
+    if source == "x":
+        writer = _build_brief_writer(settings)
+    else:
+        runner = TaskRunner(
+            api_key=settings.anthropic_api_key,
+            model=settings.task_model or settings.anthropic_model,
+            root=str(brief_path.parent / "brief-work"),
+            max_turns=20,
+            max_budget_usd=settings.brief_max_budget_usd,
+            timeout=600,
+            system_prompt=(
+                "You are a careful researcher. Use web search and web fetch. You cannot run commands or "
+                "contact anyone. Follow the task's output format exactly."
+            ),
+        )
+    return CultureBrief(str(brief_path), runner, topics=settings.brief_topics, at=settings.brief_time,
+                        x=x, source=source, writer=writer)
+
+
+def _build_brief_writer(settings: Settings) -> TextBackend:
+    """source=x: the cloud model writes the brief from the X digest when there's a key, else the local model."""
+    if settings.anthropic_api_key:
+        try:
+            return AnthropicBackend(
+                api_key=settings.anthropic_api_key,
+                model=settings.task_model or settings.anthropic_model,
+                max_tokens=1200,
+                timeout=120,
+            )
+        except ImportError:
+            print("WARNING: ANTHROPIC_API_KEY is set but the `anthropic` package is missing (uv sync --extra cloud); "
+                  "the local model will write the brief.", file=sys.stderr)
+    return OllamaBackend(
+        base_url=settings.ollama_url,
+        model=settings.ollama_model,
+        temperature=0.5,
+        max_tokens=900,
+        timeout=max(settings.ollama_timeout_seconds, 300),
+        keep_alive=settings.ollama_keep_alive,
+        num_ctx=max(settings.ollama_num_ctx, 8192),
+    )
+
+
+def create_app(settings: Settings | None = None, agent: Agent | None = None, env_path: Path | None = None) -> FastAPI:
     """Build the app. Tests pass a pre-built Agent with fake clients."""
-    settings = settings or Settings()
+    if settings is None:
+        settings = Settings()
+        # The dashboard's personality editor saves back to the .env the settings came from.
+        env_path = env_path or Path(str(settings.model_config.get("env_file") or ".env")).resolve()
     install_logging(
         settings.log_level,
-        secrets=[settings.bluebubbles_password, settings.webhook_secret, settings.anthropic_api_key],
+        secrets=[settings.bluebubbles_password, settings.webhook_secret, settings.anthropic_api_key, settings.openai_api_key,
+                 settings.resy_auth_token, settings.x_bearer_token, settings.giphy_api_key],
     )
 
     @asynccontextmanager
@@ -69,6 +179,29 @@ def create_app(settings: Settings | None = None, agent: Agent | None = None) -> 
         ag: Agent = app.state.agent
         if ag.images is not None:
             ag.images.start()
+        brief_task = (
+            asyncio.create_task(ag.brief.run_forever(), name="brief") if getattr(ag, "brief", None) is not None else None
+        )
+        sports_task = (
+            asyncio.create_task(ag.sports_poller.run_forever(), name="sports")
+            if getattr(ag, "sports_poller", None) is not None
+            else None
+        )
+        if getattr(ag, "kalshi", None) is not None:  # build the search index now, not on the first question
+            async def _warm():
+                try:
+                    await ag.kalshi._ensure_index()
+                except Exception:  # noqa: BLE001
+                    pass
+            asyncio.create_task(_warm(), name="kalshi-index")
+        watch_task = (
+            asyncio.create_task(ag.watcher.run(), name="resy-watches") if getattr(ag, "watcher", None) is not None else None
+        )
+        reminder_task = (
+            asyncio.create_task(ag.reminders.run(ag.fire_reminder), name="reminders")
+            if ag.reminders is not None
+            else None
+        )
         sweeper = asyncio.create_task(
             ag.context.run_sweeper(
                 settings.context_sweep_seconds,
@@ -80,9 +213,22 @@ def create_app(settings: Settings | None = None, agent: Agent | None = None) -> 
             yield
         finally:
             sweeper.cancel()
+            if sports_task is not None:
+                sports_task.cancel()
+            if reminder_task is not None:
+                reminder_task.cancel()
+            if watch_task is not None:
+                watch_task.cancel()
+            if brief_task is not None:
+                brief_task.cancel()
+                await ag.brief.aclose()
             if ag.images is not None:
                 await ag.images.stop()
+            await ag.stop_task()
             await ag.drain()
+            for client in (ag.links, ag.gifs, ag.tweets, getattr(ag, "espn", None), getattr(ag, "kalshi", None), getattr(ag, "resy", None)):
+                if client is not None:
+                    await client.aclose()
             ag.context.forget_all()  # context never survives a restart
             if app.state.owns_agent:
                 await ag.bb.aclose()
@@ -91,6 +237,7 @@ def create_app(settings: Settings | None = None, agent: Agent | None = None) -> 
 
     app = FastAPI(title="imessage-agent", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.state.settings = settings
+    app.state.env_path = env_path
 
     def _check_secret(secret_q: str | None, secret_h: str | None) -> None:
         provided = secret_q or secret_h or ""
@@ -121,6 +268,11 @@ def create_app(settings: Settings | None = None, agent: Agent | None = None) -> 
         request.app.state.agent.schedule(payload)
         return JSONResponse({"ok": True})
 
+    if settings.dashboard_enabled:
+        from .dashboard import build_router
+
+        app.include_router(build_router(settings))
+
     @app.get("/health")
     async def health():
         ag: Agent = app.state.agent
@@ -138,6 +290,20 @@ def create_app(settings: Settings | None = None, agent: Agent | None = None) -> 
             "ollama": ollama_ok,
             "llm_backend": ag.llm.name,
             "cloud_llm_enabled": settings.cloud_llm_enabled,
+            "cloud_facts_enabled": ag.cloud is not None,
+            "memory_enabled": ag.memory is not None,
+            "reminders_enabled": ag.reminders is not None,
+            "vision_enabled": ag.vision is not None,
+            "links_enabled": ag.links is not None,
+            "gifs_enabled": ag.gifs is not None,
+            "tweets_enabled": ag.tweets is not None,
+            "voice_enabled": getattr(ag, "voice", None) is not None,
+            "sports_alerts": bool(getattr(ag, "sports_poller", None) and ag.sports_poller.teams),
+            "bookie_enabled": getattr(ag, "bookie", None) is not None,
+            "task_enabled": ag.tasks is not None,
+            "brief_enabled": ag.brief is not None,
+            "brief_source": ag.brief.source if ag.brief is not None else None,
+            "image_backend": settings.image_backend if ag.images else None,
             "image_queue": ag.images.qsize() if ag.images else None,
             "chats_with_context": ag.context.chat_count(),
             "allowlisted_chats": len(settings.allowed_chat_guids),
@@ -163,23 +329,34 @@ def _build_agent(settings: Settings) -> Agent:
     llm = build_llm(settings)
     context = ContextStore(max_messages=settings.context_max_messages, ttl_seconds=settings.context_ttl_seconds)
     images: ImageQueue | None = None
+    llm_gate = asyncio.Semaphore(1)
     agent_holder: dict[str, Agent] = {}
 
     if settings.image_enabled:
-        gen = MfluxGenerator(
-            command=settings.mflux_command,
-            model=settings.mflux_model,
-            steps=settings.mflux_steps,
-            quantize=settings.mflux_quantize,
-            width=settings.mflux_width,
-            height=settings.mflux_height,
-            extra_args=settings.mflux_extra_args,
-            timeout=settings.image_timeout_seconds,
-        )
+        gen: MfluxGenerator | OpenAIImageGenerator
+        if settings.image_backend == "openai":
+            gen = OpenAIImageGenerator(
+                api_key=settings.openai_api_key,
+                model=settings.openai_image_model,
+                size=settings.openai_image_size,
+                quality=settings.openai_image_quality,
+                timeout=settings.openai_timeout_seconds,
+            )
+        else:
+            gen = MfluxGenerator(
+                command=settings.mflux_command,
+                model=settings.mflux_model,
+                steps=settings.mflux_steps,
+                quantize=settings.mflux_quantize,
+                width=settings.mflux_width,
+                height=settings.mflux_height,
+                extra_args=settings.mflux_extra_args,
+                timeout=settings.image_timeout_seconds,
+            )
         if not gen.available():
             print(
-                f"WARNING: IMAGE_ENABLED=true but `{settings.mflux_command}` not found on PATH; "
-                "/image will answer that images are off.",
+                f"WARNING: IMAGE_ENABLED=true but image backend `{settings.image_backend}` is not usable "
+                f"({settings.mflux_command} not on PATH, or OPENAI_API_KEY empty); /image will answer that images are off.",
                 file=sys.stderr,
             )
         else:
@@ -190,11 +367,93 @@ def _build_agent(settings: Settings) -> Agent:
                 await agent_holder["a"].image_failed(job, reason)
 
             before = None
-            if settings.unload_llm_before_image and isinstance(llm, OllamaBackend):
+            # Only the local generator competes with the LLM for RAM.
+            if settings.unload_llm_before_image and isinstance(llm, OllamaBackend) and isinstance(gen, MfluxGenerator):
                 before = llm.unload
-            images = ImageQueue(gen, _send, _fail, before_generate=before)
+            images = ImageQueue(gen, _send, _fail, before_generate=before, gate=llm_gate)
 
-    agent = Agent(settings, bb, llm, context, images, resolver=SenderResolver(bb, settings.sender_names))
+    vision = (
+        OllamaVision(settings.ollama_url, settings.vision_model, settings.vision_max_width, settings.vision_keep_alive)
+        if settings.vision_model
+        else None
+    )
+    agent = Agent(
+        settings, bb, llm, context, images,
+        resolver=SenderResolver(bb, settings.sender_names),
+        llm_gate=llm_gate,
+        cloud=build_cloud(settings),
+        memory=MemoryStore(settings.memory_dir, settings.memory_max_chars, settings.memory_update_every)
+        if settings.memory_dir
+        else None,
+        reminders=ReminderStore(settings.reminders_file) if settings.reminders_file else None,
+        vision=vision,
+        tasks=TaskRunner(
+            api_key=settings.anthropic_api_key,
+            model=settings.task_model or settings.anthropic_model,
+            root=settings.task_dir or "~/Library/Application Support/imessage-agent/tasks",
+            max_turns=settings.task_max_turns,
+            max_budget_usd=settings.task_max_budget_usd,
+            timeout=settings.task_timeout_seconds,
+            browser=settings.task_browser,
+            max_questions=settings.task_max_questions,
+            ask_timeout=settings.task_ask_timeout_seconds,
+        )
+        if settings.task_enabled and settings.anthropic_api_key
+        else None,
+        brief=build_brief(settings),
+        links=LinkReader(settings.link_x_replies, settings.link_max_chars, vision=vision, gate=llm_gate)
+        if settings.links_enabled
+        else None,
+        gifs=GifSearch(settings.giphy_api_key, settings.gif_rating) if settings.giphy_api_key else None,
+        tweets=TweetFinder(settings.x_bearer_token, min_likes=settings.tweet_min_likes,
+                           posts_per_search=settings.tweet_posts_per_search, per_hour=settings.tweets_per_hour,
+                           filters=settings.x_query_filters)
+        if settings.tweets_enabled and settings.x_bearer_token
+        else None,
+    )
+    sports_on = (settings.sports_alerts or settings.bookie_enabled) and settings.sports_chat_guids
+    if sports_on:
+        data_dir = Path(settings.memory_dir or "~/Library/Application Support/imessage-agent/memory").expanduser().parent
+        espn = ESPN()
+        fans = parse_teams(settings.sports_teams)
+        agent.espn, agent.sports_fans = espn, fans
+        if settings.bookie_enabled:
+            agent.bookie = Bookie(str(data_dir / "bookie.json"), settings.bookie_start, settings.bookie_bailout)
+        # One poller: alerts for followed teams (if on) and settling bets (if the book is open).
+        agent.sports_poller = SportsAlerts(
+            espn, fans if settings.sports_alerts else {}, str(data_dir / "sports-state.json"),
+            on_alert=agent.on_alert, on_games=agent.on_games if settings.bookie_enabled else None,
+            watch_extra=agent.bookie.open_game_ids if agent.bookie is not None else None,
+            busy=agent.bookie.waiting_on_results if agent.bookie is not None else None,
+            field_goals=settings.sports_field_goals,
+        )
+    if settings.resy_enabled:
+        from .resy import Resy
+
+        agent.resy = Resy(settings.resy_auth_token, settings.resy_api_key, settings.resy_lat, settings.resy_lon,
+                          bookings_path=str(Path(settings.memory_dir or "~/Library/Application Support/imessage-agent/memory")
+                                            .expanduser().parent / "resy-bookings.json"))
+        from .resy_watch import DropWatcher
+
+        agent.watcher = DropWatcher(agent.resy, str(Path(settings.memory_dir or "~/Library/Application Support/imessage-agent/memory")
+                                                     .expanduser().parent / "resy-watches.json"),
+                                    lambda chat, text: agent._say(chat, text))
+    if settings.kalshi_enabled:
+        from .kalshi import Kalshi
+
+        agent.kalshi = Kalshi()
+    if settings.voice_enabled:
+        from .voice import VoiceSynth, parse_pronunciations
+
+        synth = VoiceSynth(settings.voice_command, settings.voice_model, settings.voice_name, settings.voice_speed,
+                           parse_pronunciations(settings.pronunciations),
+                           respell=parse_pronunciations(settings.voice_respell))
+        agent.voice = synth if synth.available() else None
+    if settings.likeness_dir:
+        from .handler import _norm_addr
+        from .likeness import Likenesses
+
+        agent.likenesses = Likenesses(settings.likeness_dir, norm=_norm_addr)
     agent_holder["a"] = agent
     return agent
 
@@ -203,7 +462,8 @@ def run() -> None:
     import uvicorn
 
     settings = Settings()
-    app = create_app(settings)
+    # The dashboard's personality editor saves back to the .env the settings came from.
+    app = create_app(settings, env_path=Path(str(settings.model_config.get("env_file") or ".env")).resolve())
     uvicorn.run(app, host=settings.host, port=settings.port, log_level="warning", access_log=False)
 
 

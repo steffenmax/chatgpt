@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bot dashboard</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --ink:#1c1e21; --muted:#6b7280; --line:#e5e7eb; --ok:#16a34a; --bad:#dc2626; --warn:#d97706; --accent:#2563eb; --mono:ui-monospace,SFMono-Regular,Menlo,monospace; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0f1115; --card:#171a21; --ink:#e7e9ee; --muted:#9aa3b2; --line:#2a2f3a; } }
+  * { box-sizing:border-box }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.45 -apple-system,BlinkMacSystemFont,"SF Pro Text",Inter,system-ui,sans-serif; }
+  header { display:flex; align-items:baseline; gap:14px; padding:18px 20px 6px; flex-wrap:wrap }
+  header h1 { margin:0; font-size:20px; font-weight:650 }
+  header .sub { color:var(--muted); font-size:13px }
+  main { display:grid; gap:14px; padding:12px 20px 40px; grid-template-columns:repeat(auto-fit,minmax(340px,1fr)); }
+  section { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px; min-width:0 }
+  section.wide { grid-column:1 / -1 }
+  h2 { margin:0 0 10px; font-size:13px; letter-spacing:.04em; text-transform:uppercase; color:var(--muted); font-weight:600 }
+  .row { display:flex; justify-content:space-between; gap:10px; padding:6px 0; border-top:1px solid var(--line) }
+  .row:first-of-type { border-top:0 }
+  .k { color:var(--muted) } .v { text-align:right; font-variant-numeric:tabular-nums }
+  .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; font-weight:600; border:1px solid var(--line) }
+  .pill.ok { color:var(--ok) } .pill.bad { color:var(--bad) } .pill.warn { color:var(--warn) } .pill.off { color:var(--muted) }
+  .tabs { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:8px }
+  .tabs button { border:1px solid var(--line); background:transparent; color:var(--ink); padding:5px 10px; border-radius:8px; cursor:pointer }
+  .tabs button.on { border-color:var(--accent); color:var(--accent) }
+  textarea { width:100%; min-height:260px; font:13px/1.5 var(--mono); background:var(--bg); color:var(--ink); border:1px solid var(--line); border-radius:8px; padding:10px; resize:vertical }
+  .actions { display:flex; gap:8px; align-items:center; margin-top:8px }
+  button.primary { background:var(--accent); color:#fff; border:0; padding:7px 12px; border-radius:8px; cursor:pointer; font-weight:600 }
+  button.ghost { background:transparent; border:1px solid var(--line); color:var(--ink); padding:6px 10px; border-radius:8px; cursor:pointer }
+  .note { color:var(--muted); font-size:12px }
+  table { width:100%; border-collapse:collapse; font-size:14px } td, th { text-align:left; padding:6px 4px; border-top:1px solid var(--line) } th { color:var(--muted); font-weight:600; font-size:12px; border-top:0 }
+  pre.feed { margin:0; max-height:420px; overflow:auto; font:12px/1.5 var(--mono); background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:10px; white-space:pre-wrap; word-break:break-word }
+  details.xs { border-top:1px solid var(--line); padding:6px 0 } details.xs summary { cursor:pointer; font-size:14px; padding:4px 0 }
+  details.xs summary code { font-size:13px } .xpost { padding:8px 0 8px 14px; border-top:1px dashed var(--line); font-size:14px; overflow-wrap:anywhere }
+  .xpost .note a { color:inherit }
+  input.filter { width:100%; padding:7px 10px; border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--ink); margin-bottom:8px }
+  .counters { display:grid; grid-template-columns:repeat(auto-fit,minmax(110px,1fr)); gap:8px; margin-bottom:10px }
+  .counter { background:var(--bg); border:1px solid var(--line); border-radius:10px; padding:8px 10px } .counter b { display:block; font-size:20px; font-weight:650 } .counter span { font-size:12px; color:var(--muted) }
+  ul.plain { margin:0; padding-left:18px } ul.plain li { padding:2px 0 }
+</style>
+</head>
+<body>
+<header><h1 id="title">Bot dashboard</h1><span class="sub" id="uptime"></span><span class="sub" id="stamp"></span></header>
+<main>
+  <section><h2>Status</h2><div id="status"></div></section>
+  <section><h2>What it connects to</h2><div id="hosts"></div></section>
+  <section><h2>What it can see</h2><div id="sees"></div></section>
+  <section><h2>Behaviour</h2><div id="features"></div></section>
+  <section class="wide"><h2>Personality <span class="note" id="personameta" style="text-transform:none;letter-spacing:0"></span></h2>
+    <textarea id="personatext" spellcheck="true" style="min-height:200px"></textarea>
+    <div class="actions"><button class="primary" id="personasave">Save</button><button class="ghost" id="personareload">Reload</button><span class="note" id="personanote"></span></div></section>
+  <section class="wide"><h2>Memory notes</h2><div class="tabs" id="memtabs"></div><textarea id="memtext" spellcheck="false"></textarea>
+    <div class="actions"><button class="primary" id="memsave">Save</button><button class="ghost" id="memreload">Reload</button><span class="note" id="mempath"></span></div></section>
+  <section class="wide" id="briefsec" hidden><h2>Culture brief <span class="note" id="briefmeta"></span></h2>
+    <textarea id="brieftext" spellcheck="false" style="min-height:220px"></textarea>
+    <div class="actions"><button class="primary" id="briefsave">Save</button><button class="ghost" id="briefrefresh">Refresh now</button><span class="note" id="briefnote"></span></div>
+    <div id="xqsec" hidden><h2 style="margin-top:18px">X searches <span class="note" id="xqmeta" style="text-transform:none;letter-spacing:0"></span></h2><div id="xq"></div></div></section>
+  <section class="wide" id="xpsec" hidden><h2>Pulled X posts <span class="note" id="xpmeta" style="text-transform:none;letter-spacing:0"></span></h2>
+    <input class="filter" id="xpfilter" placeholder="filter posts">
+    <div id="xposts"></div></section>
+  <section class="wide"><h2>Reminders</h2><div id="reminders"></div></section>
+  <section class="wide"><h2>Live events <span class="note">(what the log records: event names, timings, counts; never message text)</span></h2>
+    <div class="counters" id="counters"></div>
+    <input class="filter" id="filter" placeholder="filter, e.g. trigger, escalate, image, reaction, memory">
+    <pre class="feed" id="feed"></pre></section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const pill = (ok, yes="on", no="off", cls) => `<span class="pill ${cls || (ok ? "ok" : "off")}">${ok ? yes : no}</span>`;
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const row = (k, v) => `<div class="row"><span class="k">${k}</span><span class="v">${v}</span></div>`;
+let state = null, memIndex = 0, memDirty = false, memDiscardArmed = null;
+
+function fmtUptime(started) {
+  const s = Math.max(0, Date.now()/1000 - started), d = Math.floor(s/86400), h = Math.floor(s%86400/3600), m = Math.floor(s%3600/60);
+  return `up ${d ? d + "d " : ""}${h}h ${m}m`;
+}
+function when(ts) {
+  const d = new Date(ts*1000), now = new Date(), same = d.toDateString() === now.toDateString();
+  return (same ? "" : d.toLocaleDateString(undefined, {weekday:"short"}) + " ") + d.toLocaleTimeString(undefined, {hour:"numeric", minute:"2-digit"});
+}
+
+async function refresh() {
+  const r = await fetch("/dashboard/api/state"); if (!r.ok) return; state = await r.json();
+  document.title = state.bot_name + " dashboard"; $("title").textContent = state.bot_name + " dashboard";
+  $("uptime").textContent = fmtUptime(state.started); $("stamp").textContent = "refreshed " + new Date().toLocaleTimeString();
+  const loaded = state.loaded_models.length ? state.loaded_models.map(m => `${esc(m.name)} <span class="note">${m.gb} GB</span>`).join("<br>") : '<span class="note">none loaded (idle)</span>';
+  $("status").innerHTML = row("BlueBubbles", pill(state.bluebubbles, "reachable", "down", state.bluebubbles ? "ok" : "bad"))
+    + row("Ollama", pill(state.ollama, "reachable", "down", state.ollama ? "ok" : "bad"))
+    + row("Chat model", esc(state.chat_model)) + row("Vision model", state.vision_model ? esc(state.vision_model) : pill(false))
+    + row("Images", state.image.enabled ? `${esc(state.image.backend)} <span class="note">${esc(state.image.model)}</span>` : pill(false))
+    + row("Image queue", state.image.queue) + row("Loaded in memory now", loaded);
+  $("hosts").innerHTML = state.hosts.map(h => row(esc(h.purpose), `${esc(h.host)} ${pill(h.local, "local", "REMOTE", h.local ? "ok" : "warn")}`)).join("")
+    + row("Cloud lookups", state.cloud.facts ? `${pill(true, "on", "", "warn")} <span class="note">${esc(state.cloud.model)}, up to ${state.cloud.searches} searches</span>` : pill(false))
+    + row("All text via cloud", pill(state.cloud.all_text, "ON", "off", state.cloud.all_text ? "bad" : "ok"))
+    + `<p class="note">Only the lines marked REMOTE ever carry chat content, and only for the cases described.</p>`;
+  $("sees").innerHTML = state.chats.map(c => `<div class="row"><span><b>${esc(c.label)}</b><br><span class="note">${c.members.length ? esc(c.members.join(", ")) : "members unknown"}</span></span><span class="v"><span class="note">${c.context_messages} msgs in context<br>${c.memory_chars ? c.memory_chars + " chars of notes" : "no notes yet"}</span></span></div>`).join("")
+    + row("Photos", pill(!!state.vision_model, "captioned locally", "ignored")) + row("Context", `${state.features.context_max_messages} msgs, wiped after ${state.features.context_ttl_hours} h idle`);
+  const f = state.features;
+  $("features").innerHTML = row("Unanswered questions", f.quiet_question_seconds > 0 ? `replies after ${f.quiet_question_seconds}s` : pill(false))
+    + row("Reactions", f.reaction_chance > 0 ? `${Math.round(f.reaction_chance*100)}% considered, ${f.reaction_cooldown_seconds}s cooldown` : pill(false))
+    + row("Memory notes", f.memory ? `every ${f.memory_update_every} msgs` : pill(false)) + row("Reminders", pill(f.reminders)) + row("Acks in voice", pill(f.voice_acks))
+    + row("/task agent", f.task ? `${pill(true, "on", "", "warn")} <span class="note">${f.task_chats} chat(s), $${f.task_budget_usd} cap each</span>` : pill(false));
+  $("memtabs").innerHTML = state.chats.map(c => `<button class="${c.index === memIndex ? "on" : ""}" data-i="${c.index}">${esc(c.label)}</button>`).join("");
+  $("memtabs").querySelectorAll("button").forEach(b => b.onclick = () => {
+    const i = +b.dataset.i;
+    if (i === memIndex) return;
+    // no confirm(): the app's browser pane silently answers "cancel" to popups
+    if (memDirty && memDiscardArmed !== i) { memDiscardArmed = i; $("mempath").textContent = "unsaved edits here: click that tab again to discard them, or Save first"; return; }
+    memDiscardArmed = null; memIndex = i; memDirty = false; loadMemory(); refresh();
+  });
+  const rem = state.chats.flatMap(c => c.reminders.map(x => ({...x, chat: c.label, index: c.index}))).sort((a, b) => a.due - b.due);
+  $("reminders").innerHTML = rem.length ? `<table><tr><th>When</th><th>Chat</th><th>Who</th><th>What</th><th></th></tr>` + rem.map(x => `<tr><td>${when(x.due)}</td><td>${esc(x.chat)}</td><td>${esc(x.who)}</td><td>${esc(x.text)}</td><td><button class="ghost" data-i="${x.index}" data-id="${x.id}">cancel</button></td></tr>`).join("") + `</table>` : '<span class="note">nothing pending</span>';
+  $("reminders").querySelectorAll("button").forEach(b => b.onclick = async () => { await fetch(`/dashboard/api/reminders/${b.dataset.i}/${b.dataset.id}`, {method:"DELETE"}); refresh(); });
+}
+async function loadMemory() {
+  const r = await fetch(`/dashboard/api/memory/${memIndex}`);
+  if (!r.ok) { $("memtext").value = ""; $("mempath").textContent = "memory is off"; return; }
+  const d = await r.json(); $("memtext").value = d.notes; $("mempath").textContent = d.path; memDirty = false;
+}
+$("memtext").addEventListener("input", () => { memDirty = true; memDiscardArmed = null; if (!$("mempath").textContent.startsWith("• unsaved")) $("mempath").textContent = "• unsaved edits"; });
+$("memsave").onclick = async () => { const r = await fetch(`/dashboard/api/memory/${memIndex}`, {method:"PUT", headers:{"content-type":"application/json"}, body: JSON.stringify({notes: $("memtext").value})}); if (r.ok) { memDirty = false; $("mempath").textContent = "saved " + new Date().toLocaleTimeString(); refresh(); } };
+$("memreload").onclick = loadMemory;
+async function events() {
+  const r = await fetch("/dashboard/api/events?n=300"); if (!r.ok) return; const d = await r.json();
+  const q = $("filter").value.trim().toLowerCase();
+  const lines = d.lines.filter(l => !q || l.toLowerCase().includes(q)).map(l => l.replace(/ ts=\S+/, "").replace(/^\S+ /, ""));
+  const feed = $("feed"), atBottom = feed.scrollTop + feed.clientHeight >= feed.scrollHeight - 8;
+  feed.textContent = lines.join("\n"); if (atBottom) feed.scrollTop = feed.scrollHeight;
+  const hour = Date.now() - 3600e3, cnt = {trigger:0, escalate:0, image:0, reaction:0, memory:0, task:0, errors:0};
+  for (const l of d.lines) { const m = l.match(/^(\S+ \S+)/); const t = m ? Date.parse(m[1].replace(",", ".")) : NaN; if (!isNaN(t) && t < hour) continue;
+    if (/event=trigger/.test(l)) cnt.trigger++; if (/event=llm\.escalate/.test(l)) cnt.escalate++; if (/event=image\.sent/.test(l)) cnt.image++;
+    if (/event=reaction\.sent/.test(l)) cnt.reaction++; if (/event=memory\.updated/.test(l)) cnt.memory++; if (/event=task\.finished/.test(l)) cnt.task++; if (/error=|\.failed/.test(l)) cnt.errors++; }
+  $("counters").innerHTML = [["replies", cnt.trigger], ["cloud lookups", cnt.escalate], ["images sent", cnt.image], ["reactions", cnt.reaction], ["memory rewrites", cnt.memory], ["tasks", cnt.task], ["errors", cnt.errors]].map(([k, v]) => `<div class="counter"><b>${v}</b><span>${k} / last hour</span></div>`).join("");
+}
+let personaDirty = false;
+async function loadPersona(force) {
+  const r = await fetch("/dashboard/api/persona"); if (!r.ok) return;
+  const d = await r.json();
+  $("personameta").textContent = `({bot_name} becomes ${d.bot_name} · ${d.saves_to_env ? "saves to .env and is used from his next reply, the old version is backed up" : "not saved to .env in this mode"})`;
+  if (force || !personaDirty) { $("personatext").value = d.persona; personaDirty = false; countPersona(); }
+}
+const countPersona = () => { $("personanote").textContent = $("personatext").value.trim().length + " characters" + (personaDirty ? " · unsaved" : ""); };
+$("personatext").addEventListener("input", () => { personaDirty = true; countPersona(); });
+$("personareload").onclick = () => loadPersona(true);
+$("personasave").onclick = async () => {
+  const r = await fetch("/dashboard/api/persona", {method:"PUT", headers:{"content-type":"application/json"}, body: JSON.stringify({persona: $("personatext").value})});
+  const d = await r.json().catch(() => ({}));
+  if (r.ok) { personaDirty = false; countPersona(); $("personanote").textContent += " · saved " + new Date().toLocaleTimeString(); }
+  else { $("personanote").textContent = "not saved: " + (d.detail || r.status); }
+};
+loadPersona(true);
+let briefDirty = false;
+async function loadBrief(force) {
+  const r = await fetch("/dashboard/api/brief"); if (!r.ok) { $("briefsec").hidden = true; return; }
+  const d = await r.json(); $("briefsec").hidden = false;
+  const age = d.age_hours == null ? "never generated" : (d.age_hours < 1 ? "updated just now" : `updated ${Math.round(d.age_hours)}h ago`);
+  const src = {web: "web search", x: `X pulls, written by ${d.writer || "the model"}`, both: "X pulls + web search"}[d.source] || d.source;
+  const x = d.x ? `, X: ${d.x.queries} queries × ${d.x.posts_per_query} posts ≈ $${d.x.est_usd_per_refresh.toFixed(2)} per refresh, est. $${Number(d.x.spent_usd).toFixed(2)} spent since ${d.x.spent_since ? d.x.spent_since.slice(0, 10) : "never"}` : "";
+  $("briefmeta").textContent = `(${age}, daily at ${d.at}, source: ${src}${x}${d.in_prompt ? ", in Ricky's prompt" : ", not in prompt: missing or older than 3 days"}${d.refreshing ? ", refreshing…" : ""}${d.last_error ? ", last attempt failed: " + d.last_error : ""})`;
+  if (force || !briefDirty) { $("brieftext").value = d.text; briefDirty = false; }
+  renderXQ(d.x);
+}
+let xpAt = undefined, xpData = null;
+const kfmt = (n) => n >= 1e6 ? (n / 1e6).toFixed(1).replace(".0", "") + "M" : n >= 1000 ? (n / 1000).toFixed(1).replace(".0", "") + "k" : String(n);
+const ago = (iso) => { if (!iso) return ""; const h = (Date.now() - new Date(iso)) / 36e5; return h < 1 ? Math.max(1, Math.round(h * 60)) + "m ago" : h < 48 ? Math.round(h) + "h ago" : Math.round(h / 24) + "d ago"; };
+async function loadXPosts(lastAt) {
+  if (lastAt === xpAt && xpData) return;
+  const r = await fetch("/dashboard/api/brief/posts"); if (!r.ok) { $("xpsec").hidden = true; return; }
+  xpData = await r.json(); xpAt = lastAt; $("xpsec").hidden = false; renderXPosts();
+}
+function renderXPosts() {
+  const d = xpData || {searches: []}, f = $("xpfilter").value.trim().toLowerCase();
+  const total = d.searches.reduce((n, s) => n + s.posts.length, 0);
+  $("xpmeta").textContent = d.at ? `(pulled ${d.at.replace("T", " ").slice(0, 16)} · ${total} posts the brief worked from, most engaged first)` : "(nothing pulled yet: hit Refresh now on the brief)";
+  $("xposts").innerHTML = d.searches.map(s => {
+    const posts = s.posts.filter(p => !f || p.text.toLowerCase().includes(f));
+    if (f && !posts.length) return "";
+    const items = posts.map(p => `<div class="xpost">${esc(p.text)}<div class="note">♥ ${kfmt(p.likes)} · reposts ${kfmt(p.reposts)} · replies ${kfmt(p.replies)} · ${ago(p.created_at)}${p.id ? ` · <a href="https://x.com/i/web/status/${encodeURIComponent(p.id)}" target="_blank" rel="noopener noreferrer">open</a>` : ""}</div></div>`).join("");
+    return `<details class="xs"${f ? " open" : ""}><summary><code>${esc(s.query)}</code> <span class="note">${posts.length} of ${s.returned} returned</span></summary>${items || '<div class="note xpost">no posts</div>'}</details>`;
+  }).join("") || '<span class="note">no posts</span>';
+}
+$("xpfilter").addEventListener("input", renderXPosts);
+function renderXQ(x) {
+  $("xqsec").hidden = !x; if (!x) { $("xpsec").hidden = true; return; }
+  loadXPosts(x.last ? x.last.at : null);
+  const origin = {X_QUERIES: "from X_QUERIES", BRIEF_TOPICS: "from BRIEF_TOPICS (X_QUERIES is empty)", defaults: "built-in defaults (X_QUERIES and BRIEF_TOPICS are empty)"}[x.origin] || "";
+  const last = x.last;
+  const lastTxt = last ? `last pull ${last.at.replace("T", " ").slice(0, 16)}: ${last.posts} posts, $${Number(last.usd).toFixed(2)}${last.queries_failed ? `, ${last.queries_failed} failed` : ""}` : "not pulled yet";
+  $("xqmeta").textContent = `(${origin} · filters: ${x.filters} · ${x.min_likes ? `${x.min_likes}+ likes · ` : ""}top liked first · last ${x.lookback_hours}h · ${lastTxt})`;
+  const byQuery = {}; (last && last.per_query || []).forEach(r => byQuery[r.query] = r);
+  const cell = (r) => {
+    if (!r) return '<span class="note">not pulled yet</span>';
+    if (r.status !== "ok") return pill(false, "", esc(r.status), "bad");
+    if (!r.posts) return pill(false, "", "0 posts", "warn");
+    return `${pill(true, `${r.posts} posts`, "", "ok")} <span class="note">${r.kept} kept</span>`;
+  };
+  const rows = x.plan.map(q => `<tr><td><code>${esc(q.query)}</code></td><td>${q.posts}</td><td>${q.min_likes ? kfmt(q.min_likes) + "+" : "any"}</td><td>${cell(byQuery[q.query])}</td></tr>`);
+  const dropped = (x.dropped || []).map(q => `<tr><td><code>${esc(q)}</code></td><td>0</td><td></td><td>${pill(false, "", "over the $ cap", "warn")}</td></tr>`);
+  $("xq").innerHTML = (rows.length || dropped.length)
+    ? `<table><tr><th>Search</th><th>Asks for</th><th>Min likes</th><th>Last pull</th></tr>${rows.join("")}${dropped.join("")}</table>`
+      + `<p class="note">≈ $${x.est_usd_per_refresh.toFixed(2)} per refresh. Edit X_QUERIES in .env, then restart the bot; new searches show here as "not pulled yet" until the next refresh.</p>`
+    : '<span class="note">no searches configured</span>';
+}
+$("brieftext").addEventListener("input", () => briefDirty = true);
+$("briefsave").onclick = async () => { const r = await fetch("/dashboard/api/brief", {method:"PUT", headers:{"content-type":"application/json"}, body: JSON.stringify({text: $("brieftext").value})}); if (r.ok) { briefDirty = false; $("briefnote").textContent = "saved " + new Date().toLocaleTimeString(); loadBrief(true); } };
+$("briefrefresh").onclick = async () => { const r = await fetch("/dashboard/api/brief/refresh", {method:"POST"}); const d = await r.json(); $("briefnote").textContent = d.detail || ""; setTimeout(() => loadBrief(true), 1500); };
+loadBrief(true); setInterval(() => loadBrief(false), 15000);
+$("filter").addEventListener("input", events);
+refresh(); loadMemory(); events();
+setInterval(refresh, 5000); setInterval(events, 3000);
+</script>
+</body>
+</html>
