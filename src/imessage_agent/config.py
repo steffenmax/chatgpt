@@ -219,6 +219,13 @@ class Settings(BaseSettings):
         start, end = int(m.group(1)) % 24, int(m.group(2)) % 24
         return start <= hour < end if start <= end else (hour >= start or hour < end)  # wraps midnight
 
+    # --- special rules for one person (the chat's designated target) ---
+    # When they seem down, the bot checks in with encouragement; when they trash-talk the bot or
+    # AI, it drops a random picture of them (their opted-in likeness) with a "this u?". Empty = off.
+    buddy_address: str = ""
+    buddy_cheer_cooldown_minutes: float = Field(default=180.0, ge=0.0)
+    buddy_jab_cooldown_minutes: float = Field(default=240.0, ge=0.0)
+
     # --- opted-in likenesses for image requests (likeness.py); empty = off ---
     likeness_dir: str = ""
 

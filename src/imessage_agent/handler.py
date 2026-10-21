@@ -25,6 +25,8 @@ from .llm import (
     INTENT_SYSTEM,
     LOOKUP_NOTICES,
     ADDRESSEE_SCHEMA,
+    BUDDY_MOOD_SCHEMA,
+    BUDDY_MOOD_SYSTEM,
     ADDRESSEE_SYSTEM,
     AFTERWORD_SUFFIX,
     CONSISTENCY_RULE,
@@ -46,6 +48,8 @@ from .llm import (
     looks_like_gif_request,
     looks_like_image_request,
     looks_like_tweet_request,
+    mentions_bots,
+    parse_mood,
     parse_intent,
     parse_reaction,
     reaction_addendum,
@@ -79,6 +83,18 @@ def _norm_addr(a: str | None) -> str:
     a = (a or "").strip().lower()
     return a if "@" in a else re.sub(r"[^\d+]", "", a)
 _ECHOED_INSTRUCTION = re.compile(r"^\s*\w+\s*:|plain version|confirm that|let(ting)? the chat know|\bthey should\b")
+# The designated person dissed the bot: a random (non-humiliating, within the likeness limits) scene.
+BUDDY_SCENES = (
+    "as a confused medieval knight who lost his horse", "riding a tiny tricycle in a business suit",
+    "as a sad mall santa on break", "as a 1980s infomercial host selling a useless gadget",
+    "as a minor league baseball mascot", "stuck inside a claw machine", "as a substitute teacher on his first day",
+    "as a pirate captain who's afraid of water", "as a contestant on a cooking show burning everything",
+    "as a renaissance painting subject looking unimpressed", "lifting a single tiny dumbbell with full effort",
+    "as a weather reporter in a hurricane", "as a lifeguard at a kiddie pool", "as a dad at a barbecue grilling one hot dog",
+)
+BUDDY_THIS_U = ("this u?", "this u, {name}?", "bold words from this guy", "said the guy in this picture",
+                "talk all that and look at this", "{name} rn")
+BUDDY_COMEBACKS = ("big talk from {name}", "say that again {name}, i dare you", "noted. you're on my list {name}")
 LIKENESS_NO = ("not with {name}'s actual face, pick something else", "nah, that one's off limits with a real guy's face",
                "i'll draw {name} doing a lot of dumb stuff, not that")
 RECAP_ACKS = ("one sec, scrolling up", "ugh fine, reading", "hold on, getting the tape", "pulling the receipts",
@@ -221,6 +237,7 @@ class Agent:
         self._last_reaction_text: dict[str, str] = {}
         self._last_roast: dict[str, str] = {}
         self._last_image_ack: dict[str, str] = {}
+        self._buddy_last: dict[tuple[str, str], float] = {}  # (chat, "down"/"jab") -> when it last fired
         # message GUID -> {"chat", "who": addresses that laughed, "fired": milestones already said}
         self._laughs: OrderedDict[str, dict[str, Any]] = OrderedDict()
         # chat -> (last unanswered message, when it gets a GIF); one timer task per chat
@@ -345,6 +362,9 @@ class Agent:
                 trigger, how = Trigger("mention", text), "followup"
         if trigger.kind == "none" and stored is not None:
             self._arm_unanswered(chat_guid, stored)
+        if (stored is not None and self.s.buddy_address and _norm_addr(address) == _norm_addr(self.s.buddy_address)
+                and ";-;" not in chat_guid and not self._muted(chat_guid)):
+            self._spawn(self._buddy_check(chat_guid, stored))
         if trigger.kind == "none":
             if self._muted(chat_guid):
                 return "stored"
@@ -1389,6 +1409,45 @@ class Agent:
             return ""
         return line
 
+    async def _buddy_check(self, chat_guid: str, msg) -> None:
+        """The designated person: encouragement when they're down, a "this u?" picture when they diss the bot."""
+        text = strip_cards(msg.text)
+        try:
+            async with self._llm_gate:
+                structured = getattr(self.llm, "structured", None)
+                system = BUDDY_MOOD_SYSTEM.replace("{name}", msg.sender).replace("{bot_name}", self.s.bot_name)
+                msgs = [{"role": "user", "content": f"{msg.sender}: {text}\n\nJSON only."}]
+                raw = await structured(system, msgs, BUDDY_MOOD_SCHEMA) if structured else await self.llm.reply(system, msgs)
+        except Exception as exc:  # noqa: BLE001
+            log_event("buddy.error", chat_guid=chat_guid, error=exc_name(exc))
+            return
+        mood = parse_mood(raw)
+        if mood == "jab" and not mentions_bots(text, self.s.bot_name):
+            mood = "none"
+        if mood not in ("down", "jab"):
+            return
+        cooldown = (self.s.buddy_cheer_cooldown_minutes if mood == "down" else self.s.buddy_jab_cooldown_minutes) * 60
+        now = time.monotonic()
+        if now - self._buddy_last.get((chat_guid, mood), -1e9) < cooldown or self._muted(chat_guid):
+            return
+        self._buddy_last[(chat_guid, mood)] = now
+        log_event("buddy.trigger", chat_guid=chat_guid, kind=mood)
+        if mood == "down":
+            nudge = (f"\n\n{msg.sender} just said: \"{text[:200]}\". He sounds down. Check in on him with one or two lines "
+                     "of real encouragement, like a friend who has his back. Warm and genuine, no roasting this time.")
+            async with self._chat_lock(chat_guid):
+                await self._reply(chat_guid, self.context.get(chat_guid), use_cloud=False, reason="buddy", nudge=nudge)
+            return
+        person = self.likenesses.match(msg.sender) if self.likenesses is not None else None
+        if person is None or self.images is None or self.s.image_backend != "mflux":
+            await self._say(chat_guid, random.choice(BUDDY_COMEBACKS).replace("{name}", msg.sender.lower()))
+            return
+        scene = random.choice(BUDDY_SCENES)
+        job = ImageJob(chat_guid=chat_guid, prompt=person.prompt_for(f"{person.name} {scene}, candid photo"),
+                       job_id=uuid.uuid4().hex[:8], loras=((str(person.lora), person.scale),),
+                       caption=random.choice(BUDDY_THIS_U).replace("{name}", msg.sender.lower()))
+        await self.images.submit(job)
+
     async def _handle_opt(self, chat_guid: str, address: str | None, opted_in: bool) -> None:
         person = self.likenesses.set_opt_in(address, opted_in) if self.likenesses is not None else None
         if person is None:
@@ -1507,6 +1566,8 @@ class Agent:
     async def send_image(self, job: ImageJob, png: Path) -> None:
         await self.bb.send_attachment(job.chat_guid, png, name=f"{self.s.bot_name.lower()}-{job.job_id}.png")
         log_event("image.sent", chat_guid=job.chat_guid, job_id=job.job_id)
+        if job.caption:
+            await self._say(job.chat_guid, job.caption)
         # So the bot knows what it just posted when the chat reacts to it.
         self.context.add(job.chat_guid, self.s.bot_name, f"[sent a picture: {job.prompt}]", from_bot=True)
 

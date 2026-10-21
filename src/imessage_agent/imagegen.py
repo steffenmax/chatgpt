@@ -37,6 +37,7 @@ class ImageJob:
     created: float = field(default_factory=time.monotonic)
     # (LoRA path, scale): an opted-in person's likeness add-on (likeness.py); mflux only
     loras: tuple[tuple[str, float], ...] = ()
+    caption: str = ""  # sent right after the picture
 
 
 class ImageGenerator(Protocol):

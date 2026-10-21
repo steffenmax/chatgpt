@@ -97,6 +97,29 @@ UNANSWERED_GIF_SYSTEM = (
 )
 
 
+BUDDY_MOOD_SYSTEM = (
+    "You read one message {name} just sent in a group chat with his friends and a bot called {bot_name}. Pick ONE "
+    "label.\n\"down\": he sounds genuinely sad, stressed, defeated, lonely, or like he's having a rough day (not a "
+    "joke or sarcasm).\n\"jab\": he's trash-talking, insulting or mocking {bot_name}, bots, or AI (e.g. '{bot_name} is "
+    "trash', 'AI is cringe', 'this bot sucks').\n\"fed_up\": he says he's tired of {bot_name} or the bot stuff, or wants "
+    "it to stop.\n\"none\": anything else: normal chat, jokes, sports, plans, roasting other people.\nWhen unsure, answer "
+    "none. Answer ONLY with JSON matching the schema."
+)
+BUDDY_MOOD_SCHEMA = {"type": "object", "properties": {"label": {"type": "string", "enum": ["down", "jab", "fed_up", "none"]}},
+                     "required": ["label"]}
+
+
+def parse_mood(raw: str) -> str:
+    m = re.search(r'"label"\s*:\s*"(down|jab|fed_up|none)"', raw or "")
+    return m.group(1) if m else "none"
+
+
+def mentions_bots(text: str, bot_name: str) -> bool:
+    """A jab only counts if it's actually about the bot or AI."""
+    return bool(re.search(rf"\b({re.escape(bot_name)}|bots?|robots?|ai|a\.i\.|chatgpt|gpt|claude|llms?|this thing|"
+                          r"artificial intelligence)\b", text or "", re.IGNORECASE))
+
+
 def looks_like_gif_request(text: str) -> bool:
     return bool(re.search(r"\bgifs?\b", text or "", re.IGNORECASE))
 
