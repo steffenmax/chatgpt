@@ -93,3 +93,12 @@ async def test_others_fed_up_opted_out_and_muted(clock, tmp_path):
     await muted[0].drain()
     assert len(muted[1].texts) == 1  # just the mute ack
     _ = asyncio
+
+
+async def test_insult_right_after_the_bot_counts_as_a_jab(clock, tmp_path):
+    agent, bb, llm, q = _agent(clock, tmp_path, "jab")
+    await agent.process(message("hang in there dziuba", from_me=True, guid="bot-1"))
+    agent.context.add(ALLOWED, "Coco", "hang in there dziuba", from_bot=True)
+    await agent.process(message("fuck you pussy", guid="j9", sender=DZ, replyToGuid="bot-1"))
+    await agent.drain()
+    assert q.jobs and q.jobs[-1].caption

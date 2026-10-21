@@ -375,7 +375,8 @@ class Agent:
             self._arm_unanswered(chat_guid, stored)
         if (stored is not None and self.s.buddy_address and _norm_addr(address) == _norm_addr(self.s.buddy_address)
                 and ";-;" not in chat_guid and not self._muted(chat_guid)):
-            self._spawn(self._buddy_check(chat_guid, stored))
+            # right after the bot spoke (or a swipe-reply to it), "f*** you" is aimed at the bot
+            self._spawn(self._buddy_check(chat_guid, stored, to_bot=bool(is_reply_to_bot or follows_bot)))
         if trigger.kind == "none":
             if self._muted(chat_guid):
                 return "stored"
@@ -1488,21 +1489,27 @@ class Agent:
         finally:
             shutil.rmtree(workdir, ignore_errors=True)
 
-    async def _buddy_check(self, chat_guid: str, msg) -> None:
+    async def _buddy_check(self, chat_guid: str, msg, to_bot: bool = False) -> None:
         """The designated person: encouragement when they're down, a "this u?" picture when they diss the bot."""
         text = strip_cards(msg.text)
+        bot_line = ""
+        if to_bot:
+            history = self.context.get(chat_guid)
+            bot_line = next((m.text for m in reversed(history) if m.from_bot and not m.text.startswith("[")), "")
         try:
             async with self._llm_gate:
                 structured = getattr(self.llm, "structured", None)
                 system = BUDDY_MOOD_SYSTEM.replace("{name}", msg.sender).replace("{bot_name}", self.s.bot_name)
-                msgs = [{"role": "user", "content": f"{msg.sender}: {text}\n\nJSON only."}]
+                said = (f"{self.s.bot_name} (the bot) just said: {bot_line[:200]}\n{msg.sender}, replying to {self.s.bot_name}: {text}"
+                        if to_bot else f"{msg.sender}: {text}")
+                msgs = [{"role": "user", "content": f"{said}\n\nJSON only."}]
                 raw = await structured(system, msgs, BUDDY_MOOD_SCHEMA) if structured else await self.llm.reply(system, msgs)
         except Exception as exc:  # noqa: BLE001
             log_event("buddy.error", chat_guid=chat_guid, error=exc_name(exc))
             return
         mood = parse_mood(raw)
-        if mood == "jab" and not mentions_bots(text, self.s.bot_name):
-            mood = "none"
+        if mood == "jab" and not (to_bot or mentions_bots(text, self.s.bot_name)):
+            mood = "none"  # an insult at someone else in the chat
         if mood not in ("down", "jab"):
             return
         cooldown = (self.s.buddy_cheer_cooldown_minutes if mood == "down" else self.s.buddy_jab_cooldown_minutes) * 60
