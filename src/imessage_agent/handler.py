@@ -1134,7 +1134,8 @@ class Agent:
                 "\n\nNotes you keep about this chat and the people in it, from earlier conversations "
                 "(use them naturally, never read them out):\n" + notes
             )
-        if self.links is not None:
+        # only when a link card is actually in the recent messages (fewer rules for the small model)
+        if self.links is not None and any("[link: " in m.text for m in self.context.get(chat_guid)):
             system += (
                 "\n\nWhen someone shares a link, a [link: ...] note after their message shows what it is: the "
                 "post or page, and for X posts the top replies. React to what's actually in it like you "
