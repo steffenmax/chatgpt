@@ -39,6 +39,7 @@ from .llm import (
     REFUSAL_ROASTS,
     REMINDER_SYSTEM,
     SELF_ONLY_RULE,
+    TAKE_IT,
     UNANSWERED_GIF_SYSTEM,
     afterword_ok,
     VOICE_SYSTEM_SUFFIX,
@@ -69,6 +70,7 @@ from .llm import (
     stop_sequences,
     strip_fake_notes,
     strip_unseen_urls,
+    jabs_at_bot,
     target_nudge,
     trim_reply,
 )
@@ -751,6 +753,11 @@ class Agent:
             await self._say_in_voice(chat_guid, "done, i wiped everything i had from this chat", "done, wiped everything i had from this chat")
             return
         nudge = target_nudge(pings or ([marker] if marker is not None else []))
+        jabbed = [m for m in (pings or ([marker] if marker is not None else [])) if not m.from_bot
+                  and jabs_at_bot(strip_cards(m.text))]
+        if jabbed and random.random() < self.s.take_it_chance:
+            log_event("reply.take_it", chat_guid=chat_guid)
+            nudge += TAKE_IT
         await self._reply(chat_guid, history, use_cloud=(intent.action == "lookup"),
                           reason="command" if force_cloud else "intent", nudge=nudge, question=ping)
 

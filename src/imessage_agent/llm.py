@@ -478,6 +478,27 @@ def target_nudge(pings: list[ContextMessage]) -> str:
     return f"\n\nSeveral people pinged you at once. Answer them in ONE message, a quick line for each:\n{lines}\n{rest.strip()}"
 
 
+
+# Insults and roasts aimed at the bot. It usually fires back; TAKE_IT_CHANCE of the time it just eats it.
+_JAB = re.compile(
+    r"\b(shut (up|it|the fuck up)|stfu|stf?u|nobody asked|who asked|fuck (you|off)|f off|eat (shit|a dick)|"
+    r"(you|u|ur|you're|youre|he's|hes|ricky'?s?) (are |is |so |such |a |an |being |lowkey |really |actually )*"
+    r"(trash|garbage|dumb|stupid|an? idiot|idiot|useless|mid|cringe|corny|lame|annoying|a clown|clown|a loser|loser|"
+    r"a bum|bum|a bozo|bozo|washed|cooked|a joke|worthless|dogshit|ass|so bad|terrible|the worst)|"
+    r"(you|u) suck|go away|log off|kys|ratio|L ricky|ricky L|take the L|nobody likes you|stick to)\b",
+    re.IGNORECASE,
+)
+
+TAKE_IT = (
+    "\n\nIf they're roasting or insulting you, this time just take it: no comeback, no 'shut up' back. Admit "
+    "they got you, laugh at yourself, or agree in a few words (like a guy who knows he walked into that one)."
+)
+
+
+def jabs_at_bot(text: str) -> bool:
+    return bool(_JAB.search(text or ""))
+
+
 def trim_reply(text: str, limit: int) -> str:
     """Cut an overlong reply at the last sentence end before the limit."""
     if limit <= 0 or len(text) <= limit:
