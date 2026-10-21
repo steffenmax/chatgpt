@@ -219,6 +219,9 @@ class Settings(BaseSettings):
         start, end = int(m.group(1)) % 24, int(m.group(2)) % 24
         return start <= hour < end if start <= end else (hour >= start or hour < end)  # wraps midnight
 
+    # --- opted-in likenesses for image requests (likeness.py); empty = off ---
+    likeness_dir: str = ""
+
     # --- dashboard (loopback only, same port as the webhook) ---
     # http://127.0.0.1:PORT/dashboard : health, what the bot can see and connect to,
     # memory notes (editable), reminders, live events. Off by default.

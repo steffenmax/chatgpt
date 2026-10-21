@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-Kind = Literal["mention", "ask", "image", "help", "forget", "remind", "reminders", "task", "mute", "unmute", "gif", "tweet", "bet", "odds", "bets", "bank", "leaderboard", "bailout", "recap", "none"]
+Kind = Literal["mention", "ask", "image", "help", "forget", "remind", "reminders", "task", "mute", "unmute", "gif", "tweet", "bet", "odds", "bets", "bank", "leaderboard", "bailout", "recap", "optout", "optin", "none"]
 
 
 @dataclass(frozen=True)
@@ -22,6 +22,7 @@ _COMMANDS = {
     "/bet": "bet", "/odds": "odds", "/bets": "bets", "/bank": "bank", "/balance": "bank",
     "/leaderboard": "leaderboard", "/board": "leaderboard", "/bailout": "bailout",
     "/recap": "recap", "/catchup": "recap", "/tldr": "recap",
+    "/optout": "optout", "/optin": "optin",
 }
 
 DEFAULT_MUTE_SECONDS = 2 * 60

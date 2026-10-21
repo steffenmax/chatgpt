@@ -62,6 +62,7 @@ from .logsafe import exc_name, log_event
 from .alerts import Alert
 from .bookie import Bookie, odds_line, parse_bet
 from .media import GifSearch, TweetFinder, clean_query, describe_tweet, gif_from_reaction
+from .likeness import Likenesses, blocked
 from .recap import RECAP_SYSTEM, gather, wants_recap, window_from
 from .sports import (ESPN, LEAGUES, Game, TeamIndex, fmt_odds, late_game, league_hint, live_odds, past_halfway,
                      too_late_to_bet)
@@ -78,6 +79,8 @@ def _norm_addr(a: str | None) -> str:
     a = (a or "").strip().lower()
     return a if "@" in a else re.sub(r"[^\d+]", "", a)
 _ECHOED_INSTRUCTION = re.compile(r"^\s*\w+\s*:|plain version|confirm that|let(ting)? the chat know|\bthey should\b")
+LIKENESS_NO = ("not with {name}'s actual face, pick something else", "nah, that one's off limits with a real guy's face",
+               "i'll draw {name} doing a lot of dumb stuff, not that")
 RECAP_ACKS = ("one sec, scrolling up", "ugh fine, reading", "hold on, getting the tape", "pulling the receipts",
               "give me a sec to catch up myself")
 BET_QUIPS = (
@@ -176,6 +179,7 @@ class Agent:
         espn: ESPN | None = None,
         bookie: Bookie | None = None,
         sports_fans: dict[str, list[str]] | None = None,
+        likenesses: Likenesses | None = None,
     ):
         self.s = settings
         self.bb = bb
@@ -201,6 +205,8 @@ class Agent:
         self.bookie = bookie
         self.sports_fans = sports_fans or {}
         self.sports_poller = None  # alerts.SportsAlerts, set by main when NFL features are on
+        # Opted-in people whose face image requests can use (trained add-ons).
+        self.likenesses = likenesses
         self._link_reads: dict[str, set[asyncio.Task]] = {}
         self._task_job: asyncio.Task | None = None
         self._task_chat: str | None = None
@@ -386,6 +392,8 @@ class Agent:
                 await self._handle_unmute(chat_guid)
             elif trigger.kind == "image":
                 await self._handle_image(chat_guid, trigger.arg)
+            elif trigger.kind in ("optout", "optin"):
+                await self._handle_opt(chat_guid, address, trigger.kind == "optin")
             elif trigger.kind == "recap":
                 await self._handle_recap(chat_guid, sender, address, trigger.arg)
             elif trigger.kind in ("bet", "odds", "bets", "bank", "leaderboard", "bailout"):
@@ -1381,6 +1389,15 @@ class Agent:
             return ""
         return line
 
+    async def _handle_opt(self, chat_guid: str, address: str | None, opted_in: bool) -> None:
+        person = self.likenesses.set_opt_in(address, opted_in) if self.likenesses is not None else None
+        if person is None:
+            await self._say(chat_guid, "you're not in my picture book, nothing to opt out of" if not opted_in
+                            else "i don't have a trained likeness for you", remember=False)
+            return
+        await self._say(chat_guid, f"done, {person.name} is back in the pictures" if opted_in
+                        else f"done, no more {person.name} in my pictures. /optin if you miss it")
+
     async def _handle_recap(self, chat_guid: str, name: str, address: str | None, arg: str) -> None:
         window = window_from(arg)
         await self._say(chat_guid, random.choice(RECAP_ACKS), remember=False)
@@ -1468,7 +1485,17 @@ class Agent:
             return
         if len(prompt) > self.s.image_prompt_max_chars:
             prompt = prompt[: self.s.image_prompt_max_chars]
-        job = ImageJob(chat_guid=chat_guid, prompt=prompt, job_id=uuid.uuid4().hex[:8])
+        loras: tuple[tuple[str, float], ...] = ()
+        person = self.likenesses.match(prompt) if self.likenesses is not None and self.s.image_backend == "mflux" else None
+        if person is not None:
+            if blocked(prompt):
+                log_event("likeness.blocked", chat_guid=chat_guid)
+                await self._say(chat_guid, random.choice(LIKENESS_NO).replace("{name}", person.name), remember=False)
+                return
+            loras = ((str(person.lora), person.scale),)
+            prompt = person.prompt_for(prompt)
+            log_event("likeness.used", chat_guid=chat_guid)
+        job = ImageJob(chat_guid=chat_guid, prompt=prompt, job_id=uuid.uuid4().hex[:8], loras=loras)
         ahead = self.images.qsize()
         pool = [a.replace("{n}", str(ahead)) for a in IMAGE_QUEUE_ACKS] if ahead else list(IMAGE_ACKS)
         last = self._last_image_ack.get(chat_guid)

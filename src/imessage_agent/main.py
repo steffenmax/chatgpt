@@ -413,6 +413,11 @@ def _build_agent(settings: Settings) -> Agent:
             busy=agent.bookie.waiting_on_results if agent.bookie is not None else None,
             field_goals=settings.sports_field_goals,
         )
+    if settings.likeness_dir:
+        from .handler import _norm_addr
+        from .likeness import Likenesses
+
+        agent.likenesses = Likenesses(settings.likeness_dir, norm=_norm_addr)
     agent_holder["a"] = agent
     return agent
 

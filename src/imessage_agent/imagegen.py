@@ -35,13 +35,15 @@ class ImageJob:
     prompt: str
     job_id: str
     created: float = field(default_factory=time.monotonic)
+    # (LoRA path, scale): an opted-in person's likeness add-on (likeness.py); mflux only
+    loras: tuple[tuple[str, float], ...] = ()
 
 
 class ImageGenerator(Protocol):
     name: str
 
     def available(self) -> bool: ...
-    async def generate(self, prompt: str, workdir: Path) -> Path: ...
+    async def generate(self, prompt: str, workdir: Path, loras: tuple[tuple[str, float], ...] = ()) -> Path: ...
 
 
 class OpenAIImageGenerator:
@@ -142,7 +144,8 @@ class MfluxGenerator:
             return Path(self.command).expanduser().is_file()
         return shutil.which(self.command) is not None
 
-    def _argv(self, prompt_file: Path | None, prompt: str | None, out: Path, seed: int) -> list[str]:
+    def _argv(self, prompt_file: Path | None, prompt: str | None, out: Path, seed: int,
+              loras: tuple[tuple[str, float], ...] = ()) -> list[str]:
         argv = [
             self.command,
             "--model", self.model,
@@ -159,6 +162,11 @@ class MfluxGenerator:
         else:
             argv += ["--prompt", prompt or ""]
         argv += self.extra_args
+        for path, scale in loras:
+            argv += ["--lora", path, str(scale)]
+        if loras:
+            # baking a LoRA into the quantized weights keeps only ~2% of it
+            argv.append("--no-bake-lora")
         return argv
 
     async def _run(self, argv: list[str], workdir: Path) -> tuple[int, str]:
@@ -183,7 +191,7 @@ class MfluxGenerator:
             raise
         return proc.returncode or 0, (err or b"").decode(errors="replace")
 
-    async def generate(self, prompt: str, workdir: Path) -> Path:
+    async def generate(self, prompt: str, workdir: Path, loras: tuple[tuple[str, float], ...] = ()) -> Path:
         """Generate one image. Returns the PNG path inside `workdir`."""
         seed = random.randint(1, 2**31 - 1)
         out = workdir / "image.png"
@@ -191,10 +199,10 @@ class MfluxGenerator:
         prompt_file.write_text(prompt, encoding="utf-8")
         os.chmod(prompt_file, 0o600)
 
-        code, err = await self._run(self._argv(prompt_file, None, out, seed), workdir)
+        code, err = await self._run(self._argv(prompt_file, None, out, seed, loras), workdir)
         if code != 0 and "prompt-file" in err:
             # Older mflux without --prompt-file: fall back to passing the prompt directly.
-            code, err = await self._run(self._argv(None, prompt, out, seed), workdir)
+            code, err = await self._run(self._argv(None, prompt, out, seed, loras), workdir)
         try:
             prompt_file.unlink()
         except OSError:
@@ -285,7 +293,8 @@ class ImageQueue:
                 try:
                     if self._before:
                         await self._before()
-                    png = await self.generator.generate(job.prompt, tmp)
+                    png = await (self.generator.generate(job.prompt, tmp, loras=job.loras) if job.loras
+                                 else self.generator.generate(job.prompt, tmp))
                 finally:
                     if self._gate is not None:
                         self._gate.release()
