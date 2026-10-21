@@ -284,6 +284,7 @@ def create_app(settings: Settings | None = None, agent: Agent | None = None, env
             "links_enabled": ag.links is not None,
             "gifs_enabled": ag.gifs is not None,
             "tweets_enabled": ag.tweets is not None,
+            "voice_enabled": getattr(ag, "voice", None) is not None,
             "sports_alerts": bool(getattr(ag, "sports_poller", None) and ag.sports_poller.teams),
             "bookie_enabled": getattr(ag, "bookie", None) is not None,
             "task_enabled": ag.tasks is not None,
@@ -413,6 +414,12 @@ def _build_agent(settings: Settings) -> Agent:
             busy=agent.bookie.waiting_on_results if agent.bookie is not None else None,
             field_goals=settings.sports_field_goals,
         )
+    if settings.voice_enabled:
+        from .voice import VoiceSynth, parse_pronunciations
+
+        synth = VoiceSynth(settings.voice_command, settings.voice_model, settings.voice_name, settings.voice_speed,
+                           parse_pronunciations(settings.pronunciations))
+        agent.voice = synth if synth.available() else None
     if settings.likeness_dir:
         from .handler import _norm_addr
         from .likeness import Likenesses

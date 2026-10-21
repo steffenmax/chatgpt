@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import shutil
 import re
 import time
 import uuid
@@ -67,6 +68,7 @@ from .alerts import Alert
 from .bookie import Bookie, odds_line, parse_bet
 from .media import GifSearch, TweetFinder, clean_query, describe_tweet, gif_from_reaction
 from .likeness import Likenesses, blocked
+from .voice import VoiceSynth, new_workdir, repeat_last, wants_voice
 from .recap import RECAP_SYSTEM, gather, wants_recap, window_from
 from .sports import (ESPN, LEAGUES, Game, TeamIndex, fmt_odds, late_game, league_hint, live_odds, past_halfway,
                      too_late_to_bet)
@@ -196,6 +198,7 @@ class Agent:
         bookie: Bookie | None = None,
         sports_fans: dict[str, list[str]] | None = None,
         likenesses: Likenesses | None = None,
+        voice: VoiceSynth | None = None,
     ):
         self.s = settings
         self.bb = bb
@@ -223,6 +226,8 @@ class Agent:
         self.sports_poller = None  # alerts.SportsAlerts, set by main when NFL features are on
         # Opted-in people whose face image requests can use (trained add-ons).
         self.likenesses = likenesses
+        # Optional local text-to-speech for voice notes.
+        self.voice = voice
         self._link_reads: dict[str, set[asyncio.Task]] = {}
         self._task_job: asyncio.Task | None = None
         self._task_chat: str | None = None
@@ -380,6 +385,8 @@ class Agent:
             trigger = Trigger("bet", text)
         elif trigger.kind == "mention" and wants_recap(text):
             trigger = Trigger("recap", text)
+        elif trigger.kind == "mention" and self.voice is not None and wants_voice(text):
+            trigger = Trigger("voice", text)
         if trigger.kind in ("mention", "ask") and self._muted(chat_guid):
             log_event("trigger", chat_guid=chat_guid, kind=trigger.kind, status="muted")
             return "muted"
@@ -414,6 +421,8 @@ class Agent:
                 await self._handle_image(chat_guid, trigger.arg)
             elif trigger.kind in ("optout", "optin"):
                 await self._handle_opt(chat_guid, address, trigger.kind == "optin")
+            elif trigger.kind == "voice":
+                await self._handle_voice(chat_guid, trigger.arg, stored)
             elif trigger.kind == "recap":
                 await self._handle_recap(chat_guid, sender, address, trigger.arg)
             elif trigger.kind in ("bet", "odds", "bets", "bank", "leaderboard", "bailout"):
@@ -690,7 +699,8 @@ class Agent:
         await self._reply(chat_guid, history, use_cloud=(intent.action == "lookup"),
                           reason="command" if force_cloud else "intent", nudge=nudge)
 
-    async def _reply(self, chat_guid: str, history, use_cloud: bool, reason: str, nudge: str = "") -> None:
+    async def _reply(self, chat_guid: str, history, use_cloud: bool, reason: str, nudge: str = "",
+                     as_voice: bool = False) -> None:
         messages = build_messages(self.s.persona, self.s.bot_name, history)
         backend = self.llm
         system = self._system_for(chat_guid) + nudge
@@ -756,7 +766,10 @@ class Agent:
                 reply = trimmed
         if not reply:
             reply = "hm, blanked. say that again?"
-        await self._say(chat_guid, reply)
+        if as_voice:
+            await self._say_voice(chat_guid, reply)
+        else:
+            await self._say(chat_guid, reply)
 
     async def _look_up(self, chat_guid: str, history, nudge: str) -> str:
         """Plain facts from the cloud model (web search), or '' if it's unavailable."""
@@ -1408,6 +1421,39 @@ class Agent:
         if not line or len(line) > 160 or is_refusal(line) or not afterword_ok(facts, line):
             return ""
         return line
+
+    async def _handle_voice(self, chat_guid: str, text: str, marker) -> None:
+        """'send a voice note' / '/voice <what>' (a new reply, spoken) or 'say that out loud' (the last one)."""
+        if self.voice is None:
+            await self._say(chat_guid, "no voice on me right now", remember=False)
+            return
+        async with self._chat_lock(chat_guid):
+            history = self.context.get(chat_guid)
+            if repeat_last(text):
+                last = next((m.text for m in reversed(history) if m.from_bot and not m.text.startswith("[")), None)
+                if last:
+                    await self._say_voice(chat_guid, last, remember=False)
+                    return
+            await self._reply(chat_guid, history, use_cloud=False, reason="voice", as_voice=True,
+                              nudge=target_nudge([marker] if marker is not None else [])
+                              + "\n\nThis reply will be read out loud as a voice note: talk like you're leaving one, "
+                                "two to four sentences, no emoji or links.")
+
+    async def _say_voice(self, chat_guid: str, text: str, remember: bool = True) -> None:
+        """Speak `text` and send it as audio; falls back to text if the voice fails."""
+        text = strip_fake_notes(text)
+        workdir = new_workdir()
+        try:
+            audio = await self.voice.synthesize(text, workdir) if self.voice is not None else None
+            if audio is None:
+                await self._say(chat_guid, text, remember=remember)
+                return
+            await self.bb.send_attachment(chat_guid, audio, name=f"{self.s.bot_name}.m4a", mime="audio/x-m4a")
+            log_event("voice.sent", chat_guid=chat_guid, chars=len(text))
+            if remember:
+                self.context.add(chat_guid, self.s.bot_name, text, from_bot=True)
+        finally:
+            shutil.rmtree(workdir, ignore_errors=True)
 
     async def _buddy_check(self, chat_guid: str, msg) -> None:
         """The designated person: encouragement when they're down, a "this u?" picture when they diss the bot."""

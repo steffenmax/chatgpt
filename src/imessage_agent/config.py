@@ -219,6 +219,15 @@ class Settings(BaseSettings):
         start, end = int(m.group(1)) % 24, int(m.group(2)) % 24
         return start <= hour < end if start <= end else (hour >= start or hour < end)  # wraps midnight
 
+    # --- voice notes (voice.py): local text-to-speech, sent as an audio attachment ---
+    voice_enabled: bool = False
+    voice_command: str = "~/.local/bin/mlx_audio.tts.generate"
+    voice_model: str = "mlx-community/Kokoro-82M-bf16"
+    voice_name: str = "am_onyx"
+    voice_speed: float = Field(default=1.0, ge=0.5, le=2.0)
+    # How to say names the voice gets wrong: "dziuba=ʤˈubə" (Kokoro phonemes).
+    pronunciations: str = ""
+
     # --- special rules for one person (the chat's designated target) ---
     # When they seem down, the bot checks in with encouragement; when they trash-talk the bot or
     # AI, it drops a random picture of them (their opted-in likeness) with a "this u?". Empty = off.
