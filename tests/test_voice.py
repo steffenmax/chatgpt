@@ -50,3 +50,32 @@ async def test_voice_failure_falls_back_to_text(clock):
     agent, bb, llm = _agent(clock, FakeVoice(fail=True))
     await agent.process(message("coco voice note please", guid="v4"))
     assert bb.texts == [(ALLOWED, "mike you absolute clown")] and getattr(bb, "attachments", []) == []
+
+
+def test_orpheus_text_keeps_sound_tags_and_respells():
+    from imessage_agent.voice import strip_tags
+
+    t = speakable("<Laugh> yo dziuba <script>x</script> you bet <sigh> again", respell={"dziuba": "Jooba"}, tags=True)
+    assert t == "<laugh> yo Jooba x you bet <sigh> again"
+    assert speakable("<laugh> yo", {"dziuba": "ʤˈubə"}) == "yo"  # Kokoro reads tags literally: dropped
+    assert strip_tags("<laugh> no way <sigh>") == "no way"
+
+
+async def test_expressive_voice_gets_tags_and_memory_stays_clean(clock):
+    v = FakeVoice()
+    v.expressive = True
+    bb, llm = FakeBB(), FakeLLM("<laugh> mike you absolute clown")
+    llm_systems = []
+    orig = llm.reply
+
+    async def spy(system, messages):
+        llm_systems.append(system)
+        return await orig(system, messages)
+
+    llm.reply = spy
+    agent = Agent(make_settings(), bb, llm, ContextStore(10, 3600, clock=clock), images=None,  # type: ignore[arg-type]
+                  resolver=SenderResolver(None, {}, use_contacts=False), voice=v)
+    await agent.process(message("/voice roast mike", guid="t1"))
+    assert "<laugh>" in llm_systems[-1] and "sound tags" in llm_systems[-1]
+    assert v.said[-1] == "<laugh> mike you absolute clown"
+    assert agent.context.get(ALLOWED)[-1].text == "mike you absolute clown"

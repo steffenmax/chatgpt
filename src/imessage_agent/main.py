@@ -418,7 +418,8 @@ def _build_agent(settings: Settings) -> Agent:
         from .voice import VoiceSynth, parse_pronunciations
 
         synth = VoiceSynth(settings.voice_command, settings.voice_model, settings.voice_name, settings.voice_speed,
-                           parse_pronunciations(settings.pronunciations))
+                           parse_pronunciations(settings.pronunciations),
+                           respell=parse_pronunciations(settings.voice_respell))
         agent.voice = synth if synth.available() else None
     if settings.likeness_dir:
         from .handler import _norm_addr

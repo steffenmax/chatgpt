@@ -68,7 +68,7 @@ from .alerts import Alert
 from .bookie import Bookie, odds_line, parse_bet
 from .media import GifSearch, TweetFinder, clean_query, describe_tweet, gif_from_reaction
 from .likeness import Likenesses, blocked
-from .voice import VoiceSynth, new_workdir, repeat_last, wants_voice
+from .voice import SOUND_TAGS, VoiceSynth, new_workdir, repeat_last, strip_tags, wants_voice
 from .recap import RECAP_SYSTEM, gather, wants_recap, window_from
 from .sports import (ESPN, LEAGUES, Game, TeamIndex, fmt_odds, late_game, league_hint, live_odds, past_halfway,
                      too_late_to_bet)
@@ -1437,7 +1437,10 @@ class Agent:
             await self._reply(chat_guid, history, use_cloud=False, reason="voice", as_voice=True,
                               nudge=target_nudge([marker] if marker is not None else [])
                               + "\n\nThis reply will be read out loud as a voice note: talk like you're leaving one, "
-                                "two to four sentences, no emoji or links.")
+                                "two to four sentences, no emoji or links." + (
+                                  " You can drop in one or two of these sound tags where they fit: "
+                                  + ", ".join(f"<{t}>" for t in SOUND_TAGS[:6]) + " (e.g. '<laugh> no way')."
+                                  if getattr(self.voice, "expressive", False) else ""))
 
     async def _say_voice(self, chat_guid: str, text: str, remember: bool = True) -> None:
         """Speak `text` and send it as audio; falls back to text if the voice fails."""
@@ -1446,12 +1449,12 @@ class Agent:
         try:
             audio = await self.voice.synthesize(text, workdir) if self.voice is not None else None
             if audio is None:
-                await self._say(chat_guid, text, remember=remember)
+                await self._say(chat_guid, strip_tags(text), remember=remember)
                 return
             await self.bb.send_attachment(chat_guid, audio, name=f"{self.s.bot_name}.m4a", mime="audio/x-m4a")
             log_event("voice.sent", chat_guid=chat_guid, chars=len(text))
             if remember:
-                self.context.add(chat_guid, self.s.bot_name, text, from_bot=True)
+                self.context.add(chat_guid, self.s.bot_name, strip_tags(text), from_bot=True)
         finally:
             shutil.rmtree(workdir, ignore_errors=True)
 

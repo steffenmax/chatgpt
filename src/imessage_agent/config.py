@@ -227,6 +227,8 @@ class Settings(BaseSettings):
     voice_speed: float = Field(default=1.0, ge=0.5, le=2.0)
     # How to say names the voice gets wrong: "dziuba=ʤˈubə" (Kokoro phonemes).
     pronunciations: str = ""
+    # The same for Orpheus, as plain respellings: "dziuba=Jooba".
+    voice_respell: str = ""
 
     # --- special rules for one person (the chat's designated target) ---
     # When they seem down, the bot checks in with encouragement; when they trash-talk the bot or

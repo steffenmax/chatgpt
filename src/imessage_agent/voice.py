@@ -1,4 +1,8 @@
-"""Voice notes: the bot's reply spoken with a local text-to-speech model (Kokoro via mlx-audio).
+"""Voice notes: the bot's reply spoken with a local text-to-speech model via mlx-audio.
+
+Models: Kokoro (fast, plain) or Orpheus (slower, expressive: <laugh>, <sigh> ... tags in the
+text become the sound). Orpheus can't take phonemes, so names get a plain respelling there
+(VOICE_RESPELL="dziuba=Jooba").
 
 Text is cleaned for speech (no links, emoji or [notes]), names get their pronunciation
 (PRONUNCIATIONS="dziuba=ʤˈubə" -> "[dziuba](/ʤˈubə/)", Kokoro's inline phoneme syntax),
@@ -19,6 +23,13 @@ from pathlib import Path
 from .logsafe import log_event
 
 MAX_CHARS = 400
+# Orpheus's sound tags; anything else in <angle brackets> is dropped.
+SOUND_TAGS = ("laugh", "chuckle", "sigh", "cough", "sniffle", "groan", "yawn", "gasp")
+_TAG = re.compile(r"<\s*/?\s*([a-z]+)\s*>", re.IGNORECASE)
+
+
+def strip_tags(text: str) -> str:
+    return " ".join(_TAG.sub("", text or "").split())
 
 _EMOJI = re.compile("[\U0001F000-\U0001FAFF☀-➿️‍]")
 _URL = re.compile(r"https?://\S+|www\.\S+")
@@ -51,8 +62,11 @@ def parse_pronunciations(raw: str) -> dict[str, str]:
     return out
 
 
-def speakable(text: str, pronunciations: dict[str, str] | None = None) -> str:
+def speakable(text: str, pronunciations: dict[str, str] | None = None, respell: dict[str, str] | None = None,
+              tags: bool = False) -> str:
+    """Text ready to speak. Kokoro: phoneme overrides, no tags. Orpheus (tags=True): respellings, sound tags kept."""
     t = _URL.sub("", text or "")
+    t = _TAG.sub(lambda m: f"<{m.group(1).lower()}>" if tags and m.group(1).lower() in SOUND_TAGS else " ", t)
     t = _NOTE.sub("", t)
     t = _EMOJI.sub("", t)
     t = " ".join(t.split())
@@ -60,19 +74,27 @@ def speakable(text: str, pronunciations: dict[str, str] | None = None) -> str:
         t = t[:MAX_CHARS].rsplit(" ", 1)[0]
     for word, ph in (pronunciations or {}).items():
         t = re.sub(rf"\b({re.escape(word)})\b", lambda m: f"[{m.group(1)}](/{ph}/)", t, flags=re.IGNORECASE)
+    for word, plain in (respell or {}).items():
+        t = re.sub(rf"\b{re.escape(word)}\b", plain, t, flags=re.IGNORECASE)
     return t
 
 
 class VoiceSynth:
     def __init__(self, command: str = "mlx_audio.tts.generate", model: str = "mlx-community/Kokoro-82M-bf16",
                  voice: str = "am_onyx", speed: float = 1.0, pronunciations: dict[str, str] | None = None,
-                 timeout: float = 120.0):
+                 timeout: float = 120.0, respell: dict[str, str] | None = None):
         self.command = command
         self.model = model
         self.voice = voice
         self.speed = speed
         self.pronunciations = pronunciations or {}
+        self.respell = respell or {}
         self.timeout = timeout
+
+    @property
+    def expressive(self) -> bool:
+        """Orpheus: understands <laugh>-style tags (and not phonemes)."""
+        return "orpheus" in self.model.lower()
 
     def available(self) -> bool:
         cmd = os.path.expanduser(self.command)
@@ -90,13 +112,17 @@ class VoiceSynth:
 
     async def synthesize(self, text: str, workdir: Path) -> Path | None:
         """An .m4a of `text` in `workdir`, or None if there's nothing to say or it failed."""
-        say = speakable(text, self.pronunciations)
-        if not re.search(r"[a-z0-9]", say, re.IGNORECASE):
+        if self.expressive:
+            say = speakable(text, respell=self.respell, tags=True)
+        else:
+            say = speakable(text, self.pronunciations)
+        if not re.search(r"[a-z0-9]", strip_tags(say), re.IGNORECASE):
             return None
-        lang = "b" if self.voice.startswith("b") else "a"
-        code = await self._run([os.path.expanduser(self.command), "--model", self.model, "--text", say, "--voice", self.voice,
-                                "--lang_code", lang, "--speed", str(self.speed), "--file_prefix", "note",
-                                "--audio_format", "wav", "--join_audio"], workdir)
+        argv = [os.path.expanduser(self.command), "--model", self.model, "--text", say, "--voice", self.voice,
+                "--speed", str(self.speed), "--file_prefix", "note", "--audio_format", "wav", "--join_audio"]
+        if not self.expressive:
+            argv += ["--lang_code", "b" if self.voice.startswith("b") else "a"]
+        code = await self._run(argv, workdir)
         wavs = sorted(workdir.glob("note*.wav"))
         if code != 0 or not wavs:
             log_event("voice.failed", status=code)
