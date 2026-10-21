@@ -123,6 +123,8 @@ class Settings(BaseSettings):
     cloud_facts_max_searches: int = Field(default=3, ge=0, le=10)
     # The model that looks facts up (fast is better here; the bot writes the reply itself).
     lookup_model: str = "claude-sonnet-5-5"
+    # Say "one sec, lemme check" before a lookup. Off: the answer just arrives.
+    lookup_notice: bool = False
     # /task: multi-step research jobs run by Claude (Agent SDK) with web search, web fetch
     # and a sandbox folder. Only from the chats listed in TASK_CHAT_GUIDS. Off by default.
     task_enabled: bool = False

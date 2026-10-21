@@ -718,8 +718,8 @@ class Agent:
         facts = ""
         if use_cloud and self.cloud is not None:
             log_event("llm.escalate", chat_guid=chat_guid, reason=reason, backend=self.cloud.name)
-            # Say so first: the lookup takes 10-20 s and silence reads as ignoring them.
-            await self._say(chat_guid, random.choice(LOOKUP_NOTICES), remember=False)
+            if self.s.lookup_notice:
+                await self._say(chat_guid, random.choice(LOOKUP_NOTICES), remember=False)
             facts = await self._look_up(chat_guid, history, nudge)
             if facts:
                 system += LOOKED_UP.replace("{facts}", facts)

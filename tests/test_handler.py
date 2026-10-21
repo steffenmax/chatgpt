@@ -194,9 +194,7 @@ async def test_mention_routed_to_cloud_when_router_says_yes(clock):
     assert agent.s.persona.split(".")[0] not in cloud.system  # no persona for the cloud model
     reply_system = next(x for x in reversed(local.systems) if "You just looked this up" in x)
     assert "trust this over it):\nGiants 24, Texans 10 (Sunday)." in reply_system
-    assert len(bb.texts) == 2, "a 'looking it up' notice, then the answer"
-    assert "look" in bb.texts[0][1] or "check" in bb.texts[0][1] or "find out" in bb.texts[0][1]
-    assert bb.texts[1] == (ALLOWED, "giants won 24-10, texans fans in shambles")
+    assert bb.texts == [(ALLOWED, "giants won 24-10, texans fans in shambles")], "no 'looking it up' notice, just the answer"
 
 
 async def test_lookup_falls_back_to_plain_facts_when_numbers_change(clock):
@@ -222,7 +220,7 @@ async def test_ask_command_always_goes_to_cloud(clock):
     assert len(cloud.calls) == 1
     # the question itself (without the slash command) is what the cloud model sees
     assert cloud.calls[0][-1]["content"].endswith("what time is kickoff")
-    assert len(bb.texts) == 2 and bb.texts[1] == (ALLOWED, "no")
+    assert bb.texts == [(ALLOWED, "no")]
 
 
 async def test_ask_without_cloud_falls_back_to_local(agent_parts):
@@ -253,7 +251,7 @@ async def test_cloud_failure_falls_back_to_local(clock, caplog):
         assert await agent.process(message("coco who won last night?", guid="f1")) == "handled:mention"
     assert len(cloud.calls) == 1
     assert len(local.calls) == 2, "dispatcher call, then the local reply after the cloud failed"
-    assert len(bb.texts) == 2 and bb.texts[1] == (ALLOWED, "yes")
+    assert bb.texts == [(ALLOWED, "yes")]
     assert any("event=llm.cloud_failed" in r.getMessage() and "error=RuntimeError" in r.getMessage() for r in caplog.records)
 
 
