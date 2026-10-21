@@ -167,6 +167,42 @@ REMINDER_SYSTEM = (
 )
 
 
+ENHANCE_ASK = re.compile(r"\benhance\b", re.IGNORECASE)
+# "enhance tom's message", "enhance what tom said", "enhance tom"
+ENHANCE_WHO = re.compile(
+    r"\benhance\s+(?:what\s+)?(?!this\b|that\b|it\b|the\b|his\b|her\b|my\b|me\b|last\b|message\b|pls\b|please\b)"
+    r"([a-z][a-z'’]+(?:\s+[a-z][a-z'’]+)?)", re.IGNORECASE)
+
+ENHANCE_SYSTEM = (
+    "You are the analyst behind a group-chat bot called {bot_name}. A friend asked {bot_name} to 'enhance' one "
+    "message, CSI style: really dig into it. Below are the surrounding messages and the target message. Give a "
+    "sharp, specific read: what they literally said; what they actually mean (subtext, tone, sarcasm, what's "
+    "between the lines); any references, slang or callbacks explained (search the web if a reference needs it); "
+    "how it fits the conversation around it; what it says about them or their situation; and what they're "
+    "probably after. Be bold and specific, no hedging, no moralizing, no therapy-speak. Plain text, 4 to 6 "
+    "dash bullets of ONE sentence each, under 700 characters total, no links."
+)
+ENHANCE_VOICE = (
+    "\n\nSomeone asked you to 'enhance' {name}'s message, CSI style: \"{target}\". Your analyst's breakdown, which "
+    "is accurate:\n{analysis}\nNow deliver it in your own voice like you're zooming in on evidence: open with a "
+    "one-line 'enhance' bit, then the real insights as short lines (4 to 7), roasting allowed. Keep every insight's "
+    "substance and every name and number exactly; don't invent anything that isn't in the breakdown."
+)
+
+
+def wants_enhance(text: str) -> bool:
+    return bool(ENHANCE_ASK.search(text or ""))
+
+
+def enhance_who(text: str) -> str | None:
+    m = ENHANCE_WHO.search(text or "")
+    if not m:
+        return None
+    who = re.sub(r"\s+(message|msg|text|said|says|take)$", "", m.group(1).strip(), flags=re.IGNORECASE).strip()
+    who = re.sub(r"['’]s$", "", who).strip()
+    return who or None
+
+
 def looks_like_gif_request(text: str) -> bool:
     return bool(re.search(r"\bgifs?\b", text or "", re.IGNORECASE))
 

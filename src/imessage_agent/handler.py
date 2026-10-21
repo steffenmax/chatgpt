@@ -28,6 +28,8 @@ from .llm import (
     ADDRESSEE_SCHEMA,
     BUDDY_MOOD_SCHEMA,
     CONTRADICTION_SCHEMA,
+    ENHANCE_SYSTEM,
+    ENHANCE_VOICE,
     CONTRADICTION_SYSTEM,
     NO_CONTRADICTION,
     BUDDY_MOOD_SYSTEM,
@@ -54,6 +56,8 @@ from .llm import (
     looks_like_image_request,
     looks_like_tweet_request,
     asks_something,
+    enhance_who,
+    wants_enhance,
     mentions_bots,
     needs_lookup,
     parse_contradiction,
@@ -393,7 +397,9 @@ class Agent:
             return "stored"
 
         # "ricky 50 on the jets" is a bet, "ricky catch me up" a recap, not chat
-        if trigger.kind == "mention" and self._bookie_here(chat_guid) and parse_bet(text):
+        if trigger.kind == "mention" and wants_enhance(text):
+            trigger = Trigger("enhance", text)
+        elif trigger.kind == "mention" and self._bookie_here(chat_guid) and parse_bet(text):
             trigger = Trigger("bet", text)
         elif trigger.kind == "mention" and self.kalshi is not None and wants_kalshi(text):
             trigger = Trigger("kalshi", text)
@@ -436,6 +442,8 @@ class Agent:
                 await self._handle_image(chat_guid, trigger.arg)
             elif trigger.kind in ("optout", "optin"):
                 await self._handle_opt(chat_guid, address, trigger.kind == "optin")
+            elif trigger.kind == "enhance":
+                await self._handle_enhance(chat_guid, sender, trigger.arg, thread if isinstance(thread, str) else None, stored)
             elif trigger.kind == "kalshi":
                 await self._handle_kalshi(chat_guid, trigger.arg)
             elif trigger.kind == "voice":
@@ -1532,6 +1540,91 @@ class Agent:
         if not line or len(line) > 160 or is_refusal(line) or not afterword_ok(facts, line):
             return ""
         return line
+
+    async def _enhance_target(self, chat_guid: str, text: str, thread: str | None, marker) -> tuple[str, str] | None:
+        """(who, what they said) for 'enhance': the swiped message, the named person's last one, or the last one."""
+        if thread:
+            try:
+                m = await self.bb.get_message(thread)
+            except Exception as exc:  # noqa: BLE001
+                log_event("enhance.lookup_failed", chat_guid=chat_guid, error=exc_name(exc))
+                m = {}
+            if m:
+                who = self.s.bot_name if m.get("isFromMe") else await self.resolver.name_for((m.get("handle") or {}).get("address"))
+                body = " ".join(str(m.get("text") or "").split())
+                photos = [a for a in (m.get("attachments") or []) if isinstance(a, dict)
+                          and str(a.get("mimeType") or "").startswith("image/") and a.get("guid")]
+                if photos and self.vision is not None:
+                    body = (body + " " + await self._caption_photos(chat_guid, photos[:1])).strip()
+                if body:
+                    return who, body
+        history = [m for m in self.context.get(chat_guid) if m is not marker]
+        named = enhance_who(text)
+        if named:
+            person = await self._remind_target(chat_guid, named)
+            first = (person or named).split(" ")[0].lower()
+            for m in reversed(history):
+                if not m.from_bot and m.sender.split(" ")[0].lower() == first:
+                    return m.sender, strip_cards(m.text)
+            try:  # older than the rolling context: look it up
+                for m in await self.bb.recent_messages(chat_guid, limit=200):
+                    if m.get("isFromMe") or m.get("associatedMessageType") or not (m.get("text") or "").strip():
+                        continue
+                    name = await self.resolver.name_for((m.get("handle") or {}).get("address"))
+                    if name.split(" ")[0].lower() == first and not wants_enhance(m.get("text") or ""):
+                        return name, " ".join(str(m["text"]).split())
+            except Exception as exc:  # noqa: BLE001
+                log_event("enhance.lookup_failed", chat_guid=chat_guid, error=exc_name(exc))
+            return None
+        for m in reversed(history):
+            if not m.from_bot:
+                return m.sender, strip_cards(m.text)
+        return next(((m.sender, m.text) for m in reversed(history)), None)
+
+    async def _handle_enhance(self, chat_guid: str, asker: str, text: str, thread: str | None, marker) -> None:
+        """CSI 'enhance': a deep read of one message (Sonnet if available), delivered in the bot's voice."""
+        target = await self._enhance_target(chat_guid, text, thread, marker)
+        if target is None:
+            await self._say(chat_guid, "enhance what? swipe-reply to the message or say whose", remember=False)
+            return
+        who, said = target
+        history = self.context.get(chat_guid)
+        around = "\n".join(f"{self.s.bot_name}: {strip_cards(m.text)}" if m.from_bot else f"{m.sender}: {strip_cards(m.text)}"
+                           for m in history[-12:] if m is not marker)
+        prompt = [{"role": "user", "content": f"Chat around it:\n{around or '(nothing)'}\n\nTarget message, from {who}: \"{said[:600]}\""}]
+        system = ENHANCE_SYSTEM.replace("{bot_name}", self.s.bot_name)
+        analysis = ""
+        async with self._chat_lock(chat_guid):
+            try:
+                if self.cloud is not None:
+                    analysis = await self.cloud.reply(system, prompt)
+                else:
+                    async with self._llm_gate:
+                        analysis = await self.llm.reply(system, prompt)
+            except Exception as exc:  # noqa: BLE001
+                log_event("enhance.failed", chat_guid=chat_guid, error=exc_name(exc))
+            analysis = strip_fake_notes(re.sub(r"https?://\S+", "", analysis or "")).strip()
+            if len(analysis) > 900:  # cut between bullets, never mid-thought
+                cut = analysis[:900]
+                analysis = cut[: cut.rfind("\n-")].strip() if cut.rfind("\n-") > 200 else cut.rsplit(". ", 1)[0] + "."
+            if not analysis or is_refusal(analysis):
+                await self._say(chat_guid, "zoomed in, still blurry. couldn't read anything into that one", remember=False)
+                return
+            voice = (self._system_for(chat_guid) + ENHANCE_VOICE.replace("{name}", who)
+                     .replace("{target}", said[:300]).replace("{analysis}", analysis) + SELF_ONLY_RULE)
+            reply = ""
+            try:
+                async with self._llm_gate:
+                    raw = await self.llm.reply(voice, build_messages(self.s.persona, self.s.bot_name, history))
+                reply = strip_fake_notes(clean_reply(raw, self.s.bot_name))
+            except Exception as exc:  # noqa: BLE001
+                log_event("enhance.voice_failed", error=exc_name(exc))
+            chat_text = "\n".join(m.text for m in history)
+            if (not reply or len(reply) > 1300 or is_refusal(reply)
+                    or not facts_kept(reply, analysis + " " + said, chat_text) or len(reply) < 120):
+                reply = f"🔍 enhancing {who.split(' ')[0]}...\n{analysis}"
+            await self._say(chat_guid, reply)
+            log_event("enhance.sent", chat_guid=chat_guid, chars=len(reply), backend=self.cloud.name if self.cloud else "local")
 
     async def _handle_kalshi(self, chat_guid: str, query: str) -> None:
         if self.kalshi is None:
