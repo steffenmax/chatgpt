@@ -76,11 +76,76 @@ def _fmt_day(d: date) -> str:
     return d.strftime("%a %b %-d")
 
 
-def parse_request(text: str, today: date, bot_name: str = "") -> Request | str:
-    """'get resy for carbone this saturday at 6 3 people' -> Request, or a short reason it can't be read."""
-    t = " " + " ".join((text or "").replace("’", "'").split()) + " "
+@dataclass
+class Parts:
+    """A reservation request as far as it's known; filled in over a few messages."""
+
+    venue: str = ""
+    area: str = ""
+    day: date | None = None
+    minutes: int | None = None
+    party: int | None = None
+    wants_bar: bool = False  # "to watch the game"
+    game: str = ""  # the "watch the pats game" bit, to look up kickoff
+    guessed_time: str = ""  # "night" -> 7pm, said back so they can correct it
+
+    def merge(self, newer: "Parts") -> "Parts":
+        for f in ("venue", "area", "day", "minutes", "party", "game", "guessed_time"):
+            v = getattr(newer, f)
+            if v not in (None, ""):
+                setattr(self, f, v)
+        if newer.minutes is not None and not newer.guessed_time:
+            self.guessed_time = ""
+        self.wants_bar = self.wants_bar or newer.wants_bar
+        return self
+
+    def missing(self) -> str | None:
+        if not self.venue and not self.area:
+            return "where? a spot (\"carbone\") or an area (\"in hoboken\")"
+        if self.party is None:
+            return "how many people?"
+        if self.day is None:
+            return "what day?"
+        if self.minutes is None:
+            return "what time?"
+        if not 1 <= self.party <= 20:
+            return "party size has to be 1 to 20"
+        return None
+
+    def request(self) -> "Request":
+        return Request(self.venue or self.area, self.day, self.minutes, self.party)  # type: ignore[arg-type]
+
+
+_MEALS = {"brunch": 11 * 60 + 30, "lunch": 12 * 60 + 30, "dinner": 19 * 60, "night": 19 * 60, "tonight": 19 * 60,
+          "evening": 19 * 60}
+
+
+def parse_parts(text: str, today: date, bot_name: str = "", followup_for: str | None = None) -> Parts:
+    """Whatever the message says about a reservation. followup_for: the field the bot just asked about,
+    so a bare "4" answers "how many people?" and a bare "8" answers "what time?"."""
+    raw = " ".join((text or "").replace("’", "'").split())
+    if followup_for and re.fullmatch(r"\s*(\d{1,2}|" + "|".join(_NUMBERS) + r")\s*[.!]*\s*", raw, re.IGNORECASE):
+        n = int(_NUMBERS.get(raw.strip(" .!").lower(), raw.strip(" .!") if raw.strip(" .!").isdigit() else 0))
+        if followup_for == "party":
+            return Parts(party=n)
+        if followup_for == "time" and 1 <= n <= 12:
+            return Parts(minutes=(n + 12 if n < 12 else n) * 60)
+    parts = Parts()
+    t = " " + raw + " "
     if bot_name:
         t = re.sub(rf"\b{re.escape(bot_name)}\b,?", " ", t, flags=re.IGNORECASE)
+    # "to watch the pats game": a bar, and maybe the kickoff time
+    m = re.search(r"\b(?:to\s+)?(?:watch|catch|for)\s+(?:the\s+)?([a-z0-9' ]{0,40}?\b(?:game|match|fight|kickoff|playoffs))\b",
+                  t, re.IGNORECASE)
+    if m:
+        parts.wants_bar, parts.game = True, m.group(1).strip()
+        t = t[:m.start()] + " " + t[m.end():]
+    # an area: "in hoboken", "near the west village"
+    stops = r"(?:on|this|next|tonight|today|tomorrow|tmrw|at|for|to|around|with|" + "|".join(_DAYS) + "|" + "|".join(_DAY_ABBR) + r")"
+    m = re.search(rf"\b(?:in|near|around|by)\s+(?!\d)([a-z][a-z .'-]*?)(?=\s+{stops}\b|\s*$|\s*[,.!?])", t, re.IGNORECASE)
+    if m and not re.fullmatch(r"(the )?(city|town|area|morning|evening|afternoon|night)", m.group(1).strip(), re.IGNORECASE):
+        parts.area = m.group(1).strip(" .'-")
+        t = t[:m.start()] + " " + t[m.end():]
     # party size
     party = None
     for pat in (r"\b(\d{1,2}|" + "|".join(_NUMBERS) + r")\s*(?:people|ppl|persons|guests|of us|heads|pax)\b",
@@ -138,21 +203,24 @@ def parse_request(text: str, today: date, bot_name: str = "") -> Request | str:
                     day = None
     t = re.sub(r"\b(this|next|tonight|today|tomorrow|tmrw|tmr|" + "|".join(_DAYS) + "|" + "|".join(_DAY_ABBR) + r")\b|\b\d{1,2}/\d{1,2}\b",
                " ", t, flags=re.IGNORECASE)
+    parts.party, parts.minutes, parts.day = party, minutes, day
+    if parts.minutes is None:
+        meal = next((w for w in _MEALS if re.search(rf"\b{w}\b", raw, re.IGNORECASE)), None)
+        if meal:
+            parts.minutes, parts.guessed_time = _MEALS[meal], meal
     # whatever's left is the restaurant
-    t = re.sub(r"\b(can you|could you|pls|please|yo|get|grab|find|book|make|snag|lock in|me|us|a|an|the|resy|rezzy|reservations?|"
-               r"res|table|for|at|on|in|tonight|around|dinner|lunch|brunch|spot)\b", " ", t, flags=re.IGNORECASE)
-    venue = " ".join(re.sub(r"[^\w&' -]", " ", t).split()).strip(" -'")
-    if not venue:
-        return "where? like: ricky get resy for carbone saturday at 7 for 4"
-    if party is None:
-        return "how many people?"
-    if minutes is None:
-        return "what time?"
-    if day is None:
-        return "what day?"
-    if not 1 <= party <= 20:
-        return "party size has to be 1 to 20"
-    return Request(venue, day, minutes, party)
+    t = re.sub(r"\b(can you|could you|pls|please|yo|get|grab|find|book|make|snag|lock in|me|us|a|an|the|resy|rezzy|"
+               r"reservations?|res|table|for|at|on|in|tonight|around|dinner|lunch|brunch|spot|night|evening|place|"
+               r"somewhere|something|good|nice|some|bar|restaurant)\b", " ", t, flags=re.IGNORECASE)
+    parts.venue = " ".join(re.sub(r"[^\w&' -]", " ", t).split()).strip(" -'")
+    return parts
+
+
+def parse_request(text: str, today: date, bot_name: str = "") -> Request | str:
+    """One-shot form: a full Request, or the question to ask next."""
+    parts = parse_parts(text, today, bot_name)
+    missing = parts.missing()
+    return missing if missing else parts.request()
 
 
 @dataclass
@@ -234,6 +302,42 @@ class Resy:
         loc = h.get("location") or {}
         return Venue(int((h.get("id") or {}).get("resy")), str(h.get("name") or query), str(loc.get("name") or h.get("locality") or ""),
                      str(h.get("url_slug") or ""), str(loc.get("code") or "ny"))
+
+    async def area_options(self, area: str, day: date, party: int, minutes: int, wants_bar: bool = False,
+                           limit: int = 3) -> list[tuple[Venue, Slot]]:
+        """Up to `limit` places in an area with a table near the time; bars first when they want to watch a game."""
+        r = await self._client.post(f"{API}/3/venuesearch/search", json={
+            "query": area, "geo": {"latitude": self.lat, "longitude": self.lon}, "per_page": 20, "types": ["venue"]})
+        r.raise_for_status()
+        words = [w for w in re.findall(r"[a-z]+", area.lower()) if len(w) > 2]
+        hits = []
+        for h in (r.json().get("search") or {}).get("hits") or []:
+            where = " ".join(str(h.get(k) or "") for k in ("locality", "neighborhood", "region")).lower()
+            where += " " + str((h.get("location") or {}).get("name") or "").lower()
+            if words and not all(w in where for w in words):
+                continue
+            cuisine = " ".join(h.get("cuisine") or []) if isinstance(h.get("cuisine"), list) else str(h.get("cuisine") or "")
+            text = f"{h.get('name')} {cuisine}"
+            # for a game: sports bars and pubs first, then grills/bars, then lounges, then everything else
+            rank = (0 if re.search(r"sports|pub|tap\b|taproom|tavern|beer|brew|saloon", text, re.IGNORECASE) else
+                    1 if re.search(r"grill|\bbar\b", text, re.IGNORECASE) else
+                    2 if re.search(r"lounge", text, re.IGNORECASE) else 3) if wants_bar else 0
+            loc = h.get("location") or {}
+            hits.append((rank, Venue(int((h.get("id") or {}).get("resy")), str(h.get("name")),
+                                                               str(loc.get("name") or h.get("locality") or ""),
+                                                               str(h.get("url_slug") or ""), str(loc.get("code") or "ny"))))
+        hits.sort(key=lambda x: x[0])
+        out: list[tuple[Venue, Slot]] = []
+        for _, venue in hits[:10]:
+            try:
+                best, _ = pick_slot(await self.slots(venue, day, party), minutes, window=60)
+            except httpx.HTTPError:
+                continue
+            if best is not None:
+                out.append((venue, best))
+            if len(out) >= limit:
+                break
+        return out
 
     async def slots(self, venue: Venue, day: date, party: int) -> list[Slot]:
         r = await self._client.get(f"{API}/4/find", params={"lat": 0, "long": 0, "day": day.isoformat(),

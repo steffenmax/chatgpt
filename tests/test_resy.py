@@ -107,3 +107,60 @@ async def test_hold_expires(clock, tmp_path, monkeypatch):
     await agent.process(message("coco get resy for carbone saturday at 6 for 4", guid="e1"))
     await agent.drain()
     assert bb.texts[-1][1] == "time's up, only 0/4 yes's. let the Carbone table go" and not agent._resy_pending
+
+
+def fake_area(calls):
+    def handler(req: httpx.Request):
+        calls.append((req.method, req.url.path))
+        if req.url.path == "/3/venuesearch/search":
+            hits = [{"id": {"resy": i}, "name": n, "url_slug": n.lower().replace(" ", "-"), "locality": loc, "cuisine": [c],
+                     "location": {"code": "nj", "name": loc}} for i, (n, loc, c) in
+                    enumerate([("Grand Vin", "Hoboken, NJ", "Italian"), ("SRO Bar", "Hoboken, NJ", "Cocktail Bar"),
+                               ("Pier Sports Pub", "Hoboken, NJ", "Sports Bar"), ("Lilia", "New York", "Italian")], 1)]
+            return httpx.Response(200, json={"search": {"hits": hits}})
+        if req.url.path == "/4/find":
+            slots = [{"date": {"start": f"{req.url.params['day']} 19:30:00"}, "config": {"token": f"t{req.url.params['venue_id']}", "type": ""},
+                      "payment": {}}]
+            return httpx.Response(200, json={"results": {"venues": [{"slots": slots}]}})
+        if req.url.path == "/3/details":
+            return httpx.Response(200, json={"book_token": {"value": "BT"}})
+        if req.url.path == "/2/user":
+            return httpx.Response(200, json={"payment_methods": [{"id": 1, "is_default": True}]})
+        if req.url.path == "/3/book":
+            return httpx.Response(200, json={"resy_token": "RT9", "reservation_id": 1})
+        return httpx.Response(404)
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+async def test_area_request_filled_in_over_messages_then_picked_and_voted(clock, tmp_path):
+    from tests.test_sports import FakeESPN, game
+
+    calls = []
+    bb = FakeBB()
+    kickoff = datetime.combine(DAY, datetime.min.time()).replace(hour=20, minute=15).astimezone()
+    pats = game("p1", ("CHI", "Bears", "Chicago Bears", -150), ("NE", "Patriots", "New England Patriots", 130), start=kickoff)
+    agent = Agent(make_settings(), bb, FakeLLM(), ContextStore(15, 3600, clock=clock), images=None,  # type: ignore[arg-type]
+                  resolver=SenderResolver(None, NAMES, use_contacts=False), espn=FakeESPN([pats]),
+                  resy=Resy("TOKEN", bookings_path=str(tmp_path / "b.json"), client=fake_area(calls)))
+    day = DAY.strftime("%A").lower()
+    await agent.process(message(f"coco reservation in Hoboken {day} night to watch the pats game", guid="h1"))
+    assert bb.texts[-1][1] == "how many people?"
+    assert await agent.process(message("4", guid="h2")) == "handled:resy_followup"  # no "coco" needed
+    msg = bb.texts[-1][1]
+    assert msg.startswith(f"open {DAY.strftime('%a')} around 7:45pm in Hoboken for 4 (going with 7:45pm for pats game kickoff):")
+    assert msg.split("\n")[1].startswith("1) Pier Sports Pub") and "SRO Bar" in msg and "Lilia" not in msg  # sports bars first, Hoboken only
+    assert await agent.process(message("2", guid="h3")) == "handled:resy_pick"
+    assert "need 4 yes's" in bb.texts[-1][1]
+    for i, who in enumerate(["+15550001111", "+15550002222", "+15550003333", "+15550004444"]):
+        await agent.process(message("yes", guid=f"v{i}", sender=who))
+    assert "locked in 🔒" in bb.texts[-1][1] and ("POST", "/3/book") in calls
+
+
+async def test_followups_only_from_the_asker_and_only_when_relevant(clock, tmp_path):
+    agent, bb, calls = _agent(clock, tmp_path)
+    await agent.process(message("coco get resy for carbone saturday at 6", guid="f1"))
+    assert bb.texts[-1][1] == "how many people?"
+    assert await agent.process(message("4", guid="f2", sender="+15550002222")) != "handled:resy_followup"  # not the asker
+    assert await agent.process(message("lol", guid="f3")) == "stored"  # nothing about the res
+    assert await agent.process(message("3", guid="f4")) == "handled:resy_followup"
+    assert "need 3 yes's" in bb.texts[-1][1]

@@ -79,7 +79,7 @@ from .alerts import Alert
 from .bookie import Bookie, odds_line, parse_bet
 from .media import GifSearch, TweetFinder, clean_query, describe_tweet, gif_from_reaction
 from .kalshi import Kalshi, format_odds, wants_kalshi
-from .resy import Booking, Resy, is_yes, parse_request, pick_slot, wants_cancel, wants_resy
+from .resy import Booking, Parts, Resy, _fmt_time, is_yes, parse_parts, pick_slot, wants_cancel, wants_resy
 from .likeness import Likenesses, blocked
 from .voice import SOUND_TAGS, VoiceSynth, new_workdir, repeat_last, strip_tags, wants_voice
 from .recap import RECAP_SYSTEM, gather, wants_recap, window_from
@@ -248,6 +248,8 @@ class Agent:
         # Optional Resy bookings, and the per-chat vote waiting on yes's.
         self.resy = resy
         self._resy_pending: dict[str, dict[str, Any]] = {}
+        self._resy_drafts: dict[str, dict[str, Any]] = {}  # a request still missing details
+        self._resy_choices: dict[str, dict[str, Any]] = {}  # "pick 1, 2 or 3" after an area search
         self._link_reads: dict[str, set[asyncio.Task]] = {}
         self._task_job: asyncio.Task | None = None
         self._task_chat: str | None = None
@@ -375,6 +377,11 @@ class Agent:
             if urls:
                 has_link = True
                 self._read_links(chat_guid, stored, urls)
+        # a reservation still being worked out: the asker's next messages fill it in / pick an option
+        if trigger.kind in ("none", "mention") and self.resy is not None and not wants_resy(text):
+            handled = await self._resy_followup(chat_guid, sender, address, strip_cards(text))
+            if handled:
+                return handled
         # a reservation waiting on yes's: a plain "yes" from someone counts toward it
         if trigger.kind in ("none", "mention") and chat_guid in self._resy_pending and is_yes(re.sub(rf"\b{re.escape(self.s.bot_name)}\b,?", "", strip_cards(text), flags=re.IGNORECASE)):
             await self._resy_yes(chat_guid, sender, address)
@@ -1559,8 +1566,7 @@ class Agent:
         return line
 
     async def _handle_resy(self, chat_guid: str, who: str, address: str | None, text: str) -> None:
-        resy = self.resy
-        if resy is None:
+        if self.resy is None:
             await self._say(chat_guid, "resy's not hooked up", remember=False)
             return
         pending = self._resy_pending.get(chat_guid)
@@ -1568,46 +1574,122 @@ class Agent:
             await self._say(chat_guid, f"still holding {pending['venue'].name} for a vote, finish that first "
                                        f"({len(pending['yes'])}/{pending['need']} yes's)", remember=False)
             return
-        req = parse_request(text, datetime.now().date(), self.s.bot_name)
-        if isinstance(req, str):
-            await self._say(chat_guid, req, remember=False)
+        self._resy_choices.pop(chat_guid, None)
+        self._resy_drafts[chat_guid] = {"parts": parse_parts(text, datetime.now().date(), self.s.bot_name), "asked": None,
+                                        "who": who, "requester": _norm_addr(address) or who, "expires": time.monotonic() + 600}
+        await self._resy_continue(chat_guid)
+
+    async def _resy_followup(self, chat_guid: str, who: str, address: str | None, text: str) -> str | None:
+        """The asker answering "how many people?" or picking "2": returns a status if it was that."""
+        key = _norm_addr(address) or who
+        choice = self._resy_choices.get(chat_guid)
+        if choice and choice["requester"] == key and time.monotonic() < choice["expires"]:
+            t = re.sub(rf"\b{re.escape(self.s.bot_name)}\b,?", " ", text, flags=re.IGNORECASE).strip().lower()
+            m = re.fullmatch(r"(?:#|number |option |the )?([1-9])(?:st|nd|rd|th)?[.!]?", t)
+            picked = None
+            if m and int(m.group(1)) <= len(choice["options"]):
+                picked = choice["options"][int(m.group(1)) - 1]
+            else:
+                picked = next((o for o in choice["options"] if t and (t in o[0].name.lower() or o[0].name.lower() in t)), None)
+            if picked:
+                self._resy_choices.pop(chat_guid, None)
+                await self._resy_hold(chat_guid, picked[0], picked[1], choice["parts"], choice["who"], choice["requester"])
+                return "handled:resy_pick"
+        draft = self._resy_drafts.get(chat_guid)
+        if draft and draft["requester"] == key and time.monotonic() < draft["expires"]:
+            newer = parse_parts(text, datetime.now().date(), self.s.bot_name, followup_for=draft["asked"])
+            if draft["asked"] != "venue":
+                newer.venue = ""  # leftover words ("lol") only count as a restaurant when that's what was asked
+            if any(v not in (None, "", False) for v in vars(newer).values()):
+                draft["parts"].merge(newer)
+                await self._resy_continue(chat_guid)
+                return "handled:resy_followup"
+        return None
+
+    async def _resy_continue(self, chat_guid: str) -> None:
+        draft = self._resy_drafts[chat_guid]
+        parts: Parts = draft["parts"]
+        if parts.game and (parts.minutes is None or parts.guessed_time) and parts.day and self.espn is not None:
+            kick = await self._kickoff(parts.game, parts.day)
+            if kick is not None:
+                parts.minutes, parts.guessed_time = max(kick - 30, 11 * 60), f"{parts.game} kickoff"
+        missing = parts.missing()
+        if missing:
+            draft["asked"] = "party" if "people" in missing else "time" if "time" in missing else "day" if "day" in missing else "venue"
+            draft["expires"] = time.monotonic() + 600
+            await self._say(chat_guid, missing, remember=False)
             return
+        self._resy_drafts.pop(chat_guid, None)
+        req = parts.request()
+        guess = f" (going with {_fmt_time(req.minutes)} for {parts.guessed_time})" if parts.guessed_time else ""
         try:
-            venue = await resy.find_venue(req.venue)
-            slots = await resy.slots(venue, req.day, req.party) if venue else []
+            if parts.venue:
+                venue = await self.resy.find_venue(parts.venue + (f" {parts.area}" if parts.area else ""))  # type: ignore[union-attr]
+                slots = await self.resy.slots(venue, req.day, req.party) if venue else []  # type: ignore[union-attr]
+            else:
+                options = await self.resy.area_options(parts.area, req.day, req.party, req.minutes, parts.wants_bar)  # type: ignore[union-attr]
         except Exception as exc:  # noqa: BLE001
             log_event("resy.failed", chat_guid=chat_guid, error=exc_name(exc))
             await self._say(chat_guid, "resy's not answering right now, try in a bit", remember=False)
             return
-        if venue is None:
-            await self._say(chat_guid, f"can't find {req.venue} on resy", remember=False)
+        day = req.day.strftime("%a")
+        if not parts.venue:
+            if not options:
+                await self._say(chat_guid, f"nothing open on resy near {_fmt_time(req.minutes)} {day} in {parts.area} for {req.party}{guess}")
+                return
+            lines = [f"{i}) {v.name}, {_fmt_time(sl.minutes)}" for i, (v, sl) in enumerate(options, 1)]
+            self._resy_choices[chat_guid] = {"options": options, "parts": parts, "who": draft["who"],
+                                             "requester": draft["requester"], "expires": time.monotonic() + 600}
+            await self._say(chat_guid, f"open {day} around {_fmt_time(req.minutes)} in {parts.area} for {req.party}{guess}:\n"
+                            + "\n".join(lines) + f"\nwhich one, {draft['who'].split(' ')[0]}? (1-{len(options)})")
             return
-        from .resy import _fmt_time
+        if venue is None:
+            await self._say(chat_guid, f"can't find {parts.venue} on resy", remember=False)
+            return
         best, others = pick_slot(slots, req.minutes)
         link = venue.link(req.day, req.party)
         if best is None:
             if others:
-                await self._say(chat_guid, f"{venue.name} has nothing near {_fmt_time(req.minutes)} {req.when.split(' ')[0]} for "
-                                           f"{req.party}. closest open: {', '.join(_fmt_time(o.minutes) for o in others)}. "
-                                           "ask again with one of those")
+                await self._say(chat_guid, f"{venue.name} has nothing near {_fmt_time(req.minutes)} {day} for {req.party}{guess}. "
+                                           f"closest open: {', '.join(_fmt_time(o.minutes) for o in others)}. ask again with one of those")
             else:
-                await self._say(chat_guid, f"{venue.name} is fully booked {req.when.rsplit(' ', 1)[0]} for {req.party}. {link}")
+                await self._say(chat_guid, f"{venue.name} is fully booked {req.day.strftime('%a %b %-d')} for {req.party}. {link}")
             return
+        await self._resy_hold(chat_guid, venue, best, parts, draft["who"], draft["requester"], others=others, note=guess)
+
+    async def _kickoff(self, game: str, day) -> int | None:
+        """Local minutes-after-midnight of the named team's game that day (ESPN), if any."""
+        from .sports import TeamIndex
+
+        try:
+            games = await self.espn.upcoming_all()  # type: ignore[union-attr]
+        except Exception:  # noqa: BLE001
+            return None
+        idx = TeamIndex.from_games(games)
+        cands = idx.candidates(game)
+        for g in sorted(games, key=lambda g: g.start):
+            local = g.start.astimezone()
+            if local.date() == day and any(g.league == lg and g.team(ab) for lg, ab in cands):
+                return local.hour * 60 + local.minute
+        return None
+
+    async def _resy_hold(self, chat_guid: str, venue, best, parts: Parts, who: str, requester: str,
+                         others: list | None = None, note: str = "") -> None:
+        """Hold a slot: fee notice first, then ask for as many yes's as there are people."""
+        req = parts.request()
+        link = venue.link(req.day, req.party)
         when = f"{best.start.strftime('%a %b %-d')} {_fmt_time(best.minutes)}"
-        head = f"{venue.name}, {when} for {req.party} is open" + (f" ({best.kind.lower()})" if best.kind else "") + "."
-        if best.minutes != req.minutes:
-            head += f" closest to {_fmt_time(req.minutes)}."
+        head = f"{venue.name}, {when} for {req.party} is open" + (f" ({best.kind.lower()})" if best.kind else "") + "." + note
         if others:
             head += f" also open: {', '.join(_fmt_time(o.minutes) for o in others)}."
         fee = best.fee_line(req.party, self.s.resy_owner_name)
-        if not resy.can_book:
+        if not self.resy.can_book:  # type: ignore[union-attr]
             await self._say(chat_guid, "\n".join(x for x in (head, fee, f"i can't book without {self.s.resy_owner_name}'s resy "
                                                                        f"login, grab it here: {link}") if x))
             return
-        need = req.party
-        mins = int(self.s.resy_yes_minutes)
+        need, mins = req.party, int(self.s.resy_yes_minutes)
         pending = {"venue": venue, "slot": best, "party": req.party, "when": when, "need": need, "yes": {},
-                   "requested_by": who, "requester": _norm_addr(address) or who, "link": link,
+                   "requested_by": who, "requester": requester, "link": link,
                    "expires": time.monotonic() + mins * 60, "id": uuid.uuid4().hex[:6]}
         self._resy_pending[chat_guid] = pending
         # the fee goes before the count, so nobody says yes without knowing it
