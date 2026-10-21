@@ -35,8 +35,8 @@ def test_first_name_matching_and_missing_sections():
 def test_bot_lines_are_marked_and_members_listed():
     hist = [ContextMessage("Max", "hey", 0.0), ContextMessage("Ricky", "my buddy doug says hi", 0.0, from_bot=True), ContextMessage("Joe", "who", 0.0)]
     content = memory_messages("", hist, "Ricky", ["Max", "Joe"])[0]["content"]
-    assert "Ricky (you): my buddy doug says hi" in content
-    assert "only names allowed under ## People): Max, Joe" in content
+    assert "doug" not in content and "Max: hey\nJoe: who" in content  # the bot's own lines never reach the note-taker
+    assert "the only names allowed under ## People): Max, Joe" in content
 
 
 async def test_store_update_grounds_model_output(tmp_path):
@@ -44,7 +44,7 @@ async def test_store_update_grounds_model_output(tmp_path):
         name = "fake"
 
         async def reply(self, system, messages):
-            assert "(you)" in system and "Running bits" in system
+            assert "own messages are left out" in system and "never go in" in system and "Running bits" in system
             return "## People\n- Max: dry\n- Doug: invented\n## Group\n- bits\n"
 
     st = MemoryStore(str(tmp_path / "m"), 3000, 2)
