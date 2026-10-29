@@ -128,3 +128,15 @@ uv run pytest
 ```
 
 Tests use a fake Garmin client and the MCP SDK's in-memory client, so they need no account.
+
+## Share card
+
+Turn a run into a 1080x1350 share graphic (route, distance, pace, time, HR, elevation, splits):
+
+```bash
+uv run python share-card/fetch_run.py            # latest run today -> share-card/run.json
+node share-card/render.mjs share-card/run.json share-card/run.png [copy.json]
+```
+
+`copy.json` can override `headline`, `subline`, `tag` and `timeline` (three labels; the middle
+one is highlighted as "now"). Needs Node with Playwright. Output files are git-ignored.
